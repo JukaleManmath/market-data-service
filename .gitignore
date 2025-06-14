@@ -1,0 +1,14 @@
+# Ignore Python virtual environments
+venv/
+__pycache__/
+*.pyc
+
+# Ignore dotenv files
+.env
+.env.*
+
+# Ignore VSCode settings 
+.vscode/
+
+# Ignore Alembic cache 
+alembic/versions/*.pyc
