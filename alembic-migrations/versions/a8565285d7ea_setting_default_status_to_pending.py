@@ -20,12 +20,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.alter_column(
-        'polling_jobs',
-        'status',
-        server_default=sa.text("'pending'"),
-        existing_type=sa.Enum('success', 'failed', 'pending', name='successcriteria')
-    )
+    # op.alter_column(
+    #     'polling_jobs',
+    #     'status',
+    #     server_default=sa.text("'pending'"),
+    #     existing_type=sa.Enum('success', 'failed', 'pending', name='successcriteria')
+    # )
 
 
 def downgrade() -> None:

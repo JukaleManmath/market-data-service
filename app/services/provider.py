@@ -17,16 +17,23 @@ from datetime import timedelta
 logger = logging.getLogger(__name__)
 # need to create a provider interface to swap sources easily(generalised service for all 3 providers).
 ALPHA_VANTAGE_URL= "https://www.alphavantage.co/query"
+FINNHUB_URL = "https://finnhub.io/api/v1/quote"
+
 
 async def get_latest_prices(symbol: str, provider: str, db: Session, include_raw_id: bool = False, send_event_to_kafka: bool = False) -> dict:
-    cache_key = f"{symbol.lower()}:alpha_vantage"
-
+    cache_key = f"{symbol.lower()}:{provider}"
+    freshness_window = timedelta(seconds=settings.db_price_ttl or 60)
     cached = redis_client.get(cache_key)
     if cached:
-        logger.info(f"[CACHE HIT] Returning cached result for {symbol}")
-        return json.loads(cached)
+        cached_data = json.loads(cached)
     
-    freshness_window = timedelta(seconds=settings.db_price_ttl or 60)
+        # Check if cached data is still fresh (timestamp comparison)
+        cached_time = datetime.fromisoformat(cached_data['timestamp'])
+        if datetime.utcnow() - cached_time < freshness_window:
+            logger.info(f"[CACHE HIT] Returning fresh cached result for {symbol}")
+            return cached_data
+        else:
+            logger.info(f"[CACHE STALE] Ignoring stale cache for {symbol}")
     
     latest = db.query(PricePoint).filter(
             PricePoint.symbol == symbol,
@@ -49,41 +56,56 @@ async def get_latest_prices(symbol: str, provider: str, db: Session, include_raw
     
     # if not in Db and Cache then fetch from provider API
 
-    vantage_params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": symbol,
-        "interval": "1min",
-        "apikey": settings.alpha_vantage_api_key
-    }
-
     for attempt in range(3):
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(ALPHA_VANTAGE_URL, params=vantage_params)
-                response.raise_for_status()
-                data = response.json()
+                if provider == "finnhub":
+                    response = await client.get(FINNHUB_URL, params={
+                        "symbol": symbol,
+                        "token": settings.finnhub_api_key
+                    })
+                    response.raise_for_status()
+                    data = response.json()
+                    logger.info(f"[FINNHUB RESPONSE] {data}")
+
+
+                    if "c" not in data:
+                        raise HTTPException(status_code=404, detail="Symbol not found or invalid response from Finnhub")
+
+                    price = float(data["c"])
+                    timestamp = datetime.utcfromtimestamp(data["t"])
+
+                elif provider == "alpha_vantage":
+                    vantage_params = {
+                        "function": "TIME_SERIES_INTRADAY",
+                        "symbol": symbol,
+                        "interval": "1min",
+                        "apikey": settings.alpha_vantage_api_key
+                    }
+                    response = await client.get(ALPHA_VANTAGE_URL, params=vantage_params)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    if "Time Series (1min)" not in data:
+                        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                            detail="Symbol not found or API limit exceeded")
+
+                    time_series_data = data["Time Series (1min)"]
+                    latest_timestamp = max(time_series_data.keys())
+                    latest_data = time_series_data[latest_timestamp]
+                    price = float(latest_data["4. close"])
+                    timestamp = datetime.strptime(latest_timestamp, "%Y-%m-%d %H:%M:%S")
+                else:
+                    raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
                 break
 
         except Exception as e:
-            logger.warning(f"[API RETRY] Attempt {attempt+1} failed for {symbol}")
+            logger.warning(f"[API RETRY] Attempt {attempt+1} failed for {symbol} with provider {provider}")
             if attempt == 2:
-                raise HTTPException(status_code=503, detail="Alpha Vantage provider unavailable")
+                raise HTTPException(status_code=503, detail=f"{provider} provider unavailable")
             await asyncio.sleep(2 ** attempt)
-        
-    if "Time Series (1min)" not in data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=" Symbol not found or API limit exceeded")
-    
-    try:
-        time_series_data = data["Time Series (1min)"]
-        latest_timestamp = max(time_series_data.keys())
-        latest_data = time_series_data[latest_timestamp]
-        price = float(latest_data["4. close"])
-        timestamp = datetime.strptime(latest_timestamp, "%Y-%m-%d %H:%M:%S")
-    except:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail="Failed to parse API response")
-    
+
+
     # storing raw API response
     raw_market_data_entry = RawMarketData(
         id=uuid4(),
@@ -95,6 +117,18 @@ async def get_latest_prices(symbol: str, provider: str, db: Session, include_raw
     db.add(raw_market_data_entry)
     db.commit()
     db.refresh(raw_market_data_entry)
+    
+    if not include_raw_id:
+        price_point_entry = PricePoint(
+            symbol=symbol,
+            provider=provider,
+            price=price,
+            timestamp=timestamp,
+            raw_data_id=raw_market_data_entry.id  
+        )
+        db.add(price_point_entry)
+        db.commit()
+        logger.info(f"[DB] Stored price point for {symbol} at {timestamp}")
 
     result = {
         "symbol": symbol,

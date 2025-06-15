@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Loop check interval in seconds
 DEFAULT_LOOP_INTERVAL = 10
-PROVIDER="alpha_vantage"
+PROVIDER="finnhub"
 
 async def polling_worker():
     while True:
