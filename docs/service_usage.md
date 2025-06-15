@@ -48,7 +48,7 @@ Set up automated price polling for specific symbols.
 **Parameters:**
 - `symbol`: Stock symbol to monitor
 - `provider`: Data source provider
-- `interval`: Polling frequency (e.g., "30s", "1m", "5m")
+- `interval`: Polling frequency (e.g. "1m", "5m")
 
 ## 3. Database Administration
 
