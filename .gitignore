@@ -1,13 +1,28 @@
-# Ignore Python virtual environments
+# Python
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Ignore dotenv files
+# Environment variables
 .env
+.env.*
+!.env.example
 
-# Ignore VSCode settings 
+# macOS
+.DS_Store
+
+# IDE
 .vscode/
+.idea/
 
-# Ignore Alembic cache 
-alembic/versions/*.pyc
+# Alembic bytecode
+alembic-migrations/versions/*.pyc
+
+# Claude Code
+.claude/
+
+# Media / large files
+*.mov
+*.mp4

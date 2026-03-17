@@ -1,81 +1,66 @@
-from confluent_kafka import Consumer, KafkaException
 import json
 import logging
 import signal
 import sys
-from sqlalchemy.orm import Session
+
+from confluent_kafka import Consumer, KafkaException
 from sqlalchemy.exc import SQLAlchemyError
+
+from app.core.config import settings
 from app.database.session import SessionLocal
-from app.models.price_points import PricePoint
-from app.models.moving_average import MovingAverage
-from datetime import datetime
+from app.services.moving_average_service import MovingAverageService
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-conf = {
-    'bootstrap.servers': 'kafka:9092',
-    'group.id': 'ma-consumer-group-test',
-    'auto.offset.reset': 'earliest'
-}
 
-consumer = Consumer(conf)
-consumer.subscribe(['price-events'])
+def start_consumer():
+    """
+    Entry point for the ma-consumer container.
 
-print("MA Consumer started and listening to 'price-events'...")
+    Subscribes to the 'price-events' Kafka topic. For every message,
+    delegates MA computation to MovingAverageService — this function
+    owns only the Kafka loop lifecycle (connect, poll, shutdown).
+    """
+    conf = {
+        "bootstrap.servers": settings.kafka_bootstrap_servers,
+        "group.id": "ma-consumer-group",
+        "auto.offset.reset": "earliest",
+    }
 
-def shutdown_handler(sig, frame):
-    print("Shutting down consumer...")
-    consumer.close()
-    sys.exit(0)
+    consumer = Consumer(conf)
+    consumer.subscribe(["price-events"])
+    logger.info("MA Consumer started — listening on 'price-events'")
 
-signal.signal(signal.SIGINT, shutdown_handler)
-signal.signal(signal.SIGTERM, shutdown_handler)
+    def shutdown(sig, frame):
+        logger.info("Shutting down MA consumer...")
+        consumer.close()
+        sys.exit(0)
 
-def compute_moving_average(symbol: str, provider: str, db: Session):
-    rows = db.query(PricePoint).filter_by(symbol=symbol)\
-        .order_by(PricePoint.timestamp.desc()).limit(5).all()
-    if len(rows) == 5:
-        avg_price = sum(r.price for r in rows) / 5
-        latest_ts = max(r.timestamp for r in rows)
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
 
-        exists = db.query(MovingAverage).filter_by(
-            symbol=symbol,
-            interval=5,
-            timestamp=latest_ts,
-            provider=provider
-        ).first()
+    while True:
+        try:
+            msg = consumer.poll(timeout=1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                raise KafkaException(msg.error())
 
-        if not exists:
-            ma = MovingAverage(
-                symbol=symbol,
-                average_price=avg_price,
-                interval=5,
-                provider=provider,
-                timestamp=latest_ts
-            )
-            db.add(ma)
-            db.commit()
-            logging.info(f"[MA] Inserted: {symbol} @ {latest_ts} → {avg_price:.2f}")
-        else:
-            logging.info(f"[MA] Already exists: {symbol} @ {latest_ts}")
+            data = json.loads(msg.value())
+            logger.info(f"[Kafka] Received: {data}")
 
-while True:
-    try:
-        msg = consumer.poll(timeout=1.0)
-        if msg is None:
-            logging.debug("[Kafka] No message received yet...")
-            continue
-        if msg.error():
-            raise KafkaException(msg.error())
-        
-        logging.info(f"[Kafka] Received message: {msg.value().decode('utf-8')}")
+            db = SessionLocal()
+            try:
+                MovingAverageService(db=db).compute_and_store(
+                    symbol=data["symbol"],
+                    provider=data["source"],
+                )
+            finally:
+                db.close()
 
-        data = json.loads(msg.value())
-        db: Session = SessionLocal()
-        compute_moving_average(data["symbol"], data["source"], db)
-        db.close()
-
-    except SQLAlchemyError as se:
-        logging.exception(f"[DB ERROR] {se}")
-    except Exception as e:
-        logging.exception(f"[Kafka Consumer Error] {e}")
+        except SQLAlchemyError as e:
+            logger.exception(f"[DB ERROR] {e}")
+        except Exception as e:
+            logger.exception(f"[Consumer ERROR] {e}")
