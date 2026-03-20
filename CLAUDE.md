@@ -14,14 +14,14 @@ Full 9-phase build plan is in [README.md](README.md).
 
 ---
 
-## Current State — Phase 1 Complete
+## Current State — Phase 2 Complete
 
-Bugs fixed and codebase fully refactored with OOP + SOLID principles. Ready for Phase 2.
+DB partitioned, fully async stack (SQLAlchemy + Redis), Kafka tuned. Ready for Phase 3.
 
 | Phase | What | Status |
 |-------|------|--------|
 | 1 | Fix 3 bugs + OOP/SOLID refactor (provider abstraction, PriceService, MovingAverageService) | **Done** |
-| 2 | Async SQLAlchemy, DB partitioning, Kafka tuning, async Redis | Not started |
+| 2 | DB partitioning, async SQLAlchemy, async Redis, Kafka tuning | **Done** |
 | 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | Not started |
 | 4 | JSON logging, RequestID middleware, /health endpoint | Not started |
 | 5 | Portfolio model, live P&L snapshot, position management | Not started |
@@ -42,10 +42,10 @@ app/
     poll.py                            # POST /prices/poll
   core/
     config.py                          # Settings via pydantic-settings (reads .env)
-    redis.py                           # Sync redis_client — Phase 2 → redis.asyncio
+    redis.py                           # Async redis_client (redis.asyncio.Redis)
   database/
     base.py                            # SQLAlchemy declarative Base (imports all models)
-    session.py                         # Sync SessionLocal + get_db() — Phase 2 → AsyncSession
+    session.py                         # Sync SessionLocal (MA consumer) + AsyncSessionLocal + get_async_db()
   kafka/
     producer.py                        # send_price_event() → price-events topic
     consumer.py                        # start_consumer() — Kafka loop, delegates to MovingAverageService
@@ -100,10 +100,10 @@ PriceService.get_latest_price(symbol)
 ```
 
 ### Key design decisions
-- **Sync SQLAlchemy** — `SessionLocal` / `Session`. Phase 2 → `AsyncSession`.
-- **Sync Redis** — `redis_client.get/setex`. Phase 2 → `redis.asyncio`.
-- **Cache key** — `{symbol.lower()}:{provider}`. Phase 2 → `price:{SYMBOL}:{provider}`.
-- **confluent_kafka** for both producer and consumer. MA consumer stays sync.
+- **Async SQLAlchemy** — `AsyncSessionLocal` / `AsyncSession` for API + polling worker. Sync `SessionLocal` kept for the MA consumer (confluent_kafka is blocking).
+- **Async Redis** — `redis.asyncio.Redis`. Cache key: `{symbol.lower()}:{provider}`.
+- **confluent_kafka** for both producer and consumer. MA consumer stays sync by design.
+- **Kafka producer** — `acks="all"`, `retries=5`. No per-message `flush()`. Flushed once on app shutdown via lifespan.
 - **PriceService is per-request** — db session is request-scoped, so PriceService is too.
 - **No auth, no rate limiting** — Phase 9.
 
@@ -135,10 +135,10 @@ MA Consumer (separate container, price-events topic):
 |-------|-------------|-------|
 | `polling_jobs` | symbol, provider, interval, status (pending/success/failed), last_polled_at | Drives background polling |
 | `raw_market_data` | id (UUID), symbol, provider, raw_json, timestamp | Raw API responses |
-| `price_points` | id (UUID), symbol, price, timestamp, provider, raw_data_id (FK) | Not yet partitioned |
+| `price_points` | id (UUID), symbol, price, timestamp, provider, raw_data_id (FK) | Partitioned by month (`RANGE` on timestamp). PK is `(id, timestamp)`. |
 | `moving_average` | symbol, average_price, interval=5, provider, timestamp | 5-pt MA, deduped by timestamp |
 
-**Phase 2 adds:** monthly `RANGE` partitioning on `price_points(timestamp)`.
+**Phase 2 done:** monthly `RANGE` partitioning on `price_points(timestamp)`. Partitions exist for 2026-03 through 2027-12 plus `price_points_future`.
 **Phase 3 adds:** `alerts` table with `AlertSeverity` and `AnomalyType` enums.
 **Phase 5 adds:** `portfolios` and `positions` tables.
 
@@ -188,14 +188,13 @@ ALERT_WEBHOOK_URLS        # Comma-separated webhook URLs
 
 Current `requirements/requirements.txt`:
 - `fastapi`, `uvicorn`, `uvloop` — web server
-- `sqlalchemy`, `alembic`, `psycopg2-binary` — sync DB
-- `redis` — sync Redis client
+- `sqlalchemy[asyncio]`, `asyncpg`, `alembic`, `psycopg2-binary` — async DB (sync kept for MA consumer)
+- `redis` — includes `redis.asyncio` client
 - `confluent_kafka` — Kafka
 - `httpx` — async HTTP for external APIs
 - `pydantic-settings` — config
 
 **To add per phase:**
-- Phase 2: `asyncpg`, `sqlalchemy[asyncio]`, `redis[asyncio]`
 - Phase 6: `numpy`, `scipy`
 - Phase 7: `aiokafka`
 - Phase 8: `anthropic`
@@ -206,11 +205,11 @@ Current `requirements/requirements.txt`:
 ## Common Commands
 
 ```bash
-# Start everything
-docker compose -f docker/docker-compose.yml up --build
+# Start everything (--env-file required — compose file lives in docker/, .env is at root)
+docker compose -f docker/docker-compose.yml --env-file .env up --build
 
 # Rebuild a single service
-docker compose -f docker/docker-compose.yml up --build api
+docker compose -f docker/docker-compose.yml --env-file .env up --build api
 
 # View logs
 docker compose -f docker/docker-compose.yml logs -f marketdata-api
@@ -231,7 +230,10 @@ curl -X POST http://localhost:8000/prices/poll \
   -d '{"symbols": ["AAPL", "NVDA"], "interval": 30, "provider": "finnhub"}'
 
 # Check DB directly
-docker exec db psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT * FROM price_points LIMIT 5;"
+docker exec postgres psql -U postgres -d marketdata -c "SELECT * FROM price_points LIMIT 5;"
+
+# Check partition structure
+docker exec postgres psql -U postgres -d marketdata -c "\d+ price_points"
 
 # Wipe everything (including DB volume)
 docker compose -f docker/docker-compose.yml down -v
@@ -245,5 +247,6 @@ docker compose -f docker/docker-compose.yml down -v
 - **Never import `settings` inside a provider class body** — keys are injected via constructor from `registry.py`.
 - **PriceService is not a singleton** — instantiate it per request/job tick with the correct `db` session.
 - **`include_raw_id` parameter is gone** — it was part of the old duplicate-write bug. `_persist()` always writes both `RawMarketData` and `PricePoint`.
-- **MA consumer runs in a separate container** — it has its own DB session lifecycle, independent of the API.
-- **Cache key format changes in Phase 2** — current: `{symbol.lower()}:{provider}`, future: `price:{SYMBOL}:{provider}`.
+- **MA consumer uses sync session** — `SessionLocal`, not `AsyncSessionLocal`. confluent_kafka's poll loop is blocking.
+- **price_points PK is `(id, timestamp)`** — Postgres requires the partition key in every unique constraint. Queries filtering only on `id` won't use the PK index efficiently; always include `timestamp`.
+- **`--env-file .env` is required** — the compose file is in `docker/`, so Docker Compose won't find the root `.env` automatically. Always pass `--env-file .env` from the project root.

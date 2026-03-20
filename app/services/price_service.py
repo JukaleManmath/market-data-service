@@ -3,8 +3,9 @@ import logging
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-import redis
-from sqlalchemy.orm import Session
+from redis.asyncio import Redis
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.kafka.producer import send_price_event
@@ -32,7 +33,7 @@ class PriceService:
     redis.Redis → redis.asyncio.Redis without changing this class's structure.
     """
 
-    def __init__(self, provider: BaseProvider, db: Session, cache: redis.Redis):
+    def __init__(self, provider: BaseProvider, db: AsyncSession, cache: Redis):
         self.provider = provider
         self.db = db
         self.cache = cache
@@ -45,9 +46,9 @@ class PriceService:
     def _cache_key(self, symbol: str) -> str:
         return f"{symbol.lower()}:{self.provider.name}"
 
-    def _get_from_cache(self, symbol: str) -> dict | None:
+    async def _get_from_cache(self, symbol: str) -> dict | None:
         """Return a fresh cached price dict, or None if missing/stale."""
-        raw = self.cache.get(self._cache_key(symbol))
+        raw = await self.cache.get(self._cache_key(symbol))
         if not raw:
             return None
 
@@ -60,27 +61,29 @@ class PriceService:
         logger.info(f"[CACHE STALE] {symbol}")
         return None
 
-    def _get_from_db(self, symbol: str) -> dict | None:
+    async def _get_from_db(self, symbol: str) -> dict | None:
         """Return the most recent price from DB if within the freshness window."""
-        row = (
-            self.db.query(PricePoint)
-            .filter(
+        stmt = (
+            select(PricePoint)
+            .where(
                 PricePoint.symbol == symbol,
                 PricePoint.provider == self.provider.name,
                 PricePoint.timestamp >= datetime.utcnow() - self._freshness,
             )
             .order_by(PricePoint.timestamp.desc())
-            .first()
+            .limit(1)
         )
+        result = await self.db.execute(stmt)
+        row = result.scalars().first()
         if not row:
             return None
 
         logger.info(f"[DB HIT] {symbol}")
-        result = self._build_result_dict(symbol, row.price, row.timestamp)
-        self._write_to_cache(symbol, result)
-        return result
+        price_dict = self._build_result_dict(symbol, row.price, row.timestamp)
+        await self._write_to_cache(symbol, price_dict)
+        return price_dict
 
-    def _persist(self, fetch_result: PriceFetchResult) -> str:
+    async def _persist(self, fetch_result: PriceFetchResult) -> str:
         """
         Write RawMarketData + PricePoint to the DB.
         Returns the raw_data_id string (needed for the Kafka event).
@@ -93,8 +96,8 @@ class PriceService:
             timestamp=datetime.utcnow(),
         )
         self.db.add(raw_entry)
-        self.db.commit()
-        self.db.refresh(raw_entry)
+        await self.db.commit()
+        await self.db.refresh(raw_entry)
 
         self.db.add(PricePoint(
             symbol=fetch_result.symbol,
@@ -103,13 +106,13 @@ class PriceService:
             timestamp=fetch_result.timestamp,
             raw_data_id=raw_entry.id,
         ))
-        self.db.commit()
+        await self.db.commit()
         logger.info(f"[DB] Stored price point for {fetch_result.symbol} @ {fetch_result.timestamp}")
 
         return str(raw_entry.id)
 
-    def _write_to_cache(self, symbol: str, data: dict) -> None:
-        self.cache.setex(self._cache_key(symbol), int(self._freshness.total_seconds()), json.dumps(data))
+    async def _write_to_cache(self, symbol: str, data: dict) -> None:
+        await self.cache.setex(self._cache_key(symbol), int(self._freshness.total_seconds()), json.dumps(data))
         logger.info(f"[CACHE SET] {symbol}")
 
     async def _publish_to_kafka(self, fetch_result: PriceFetchResult, raw_data_id: str) -> None:
@@ -147,20 +150,20 @@ class PriceService:
         persistence and optionally a Kafka event.
         """
         # Tier 1: Redis cache
-        result = self._get_from_cache(symbol)
+        result = await self._get_from_cache(symbol)
         if result:
             return result
 
         # Tier 2: DB (recent price_points)
-        result = self._get_from_db(symbol)
+        result = await self._get_from_db(symbol)
         if result:
             return result
 
         # Tier 3: external API via injected provider
         fetch_result = await self.provider.fetch(symbol)
-        raw_data_id = self._persist(fetch_result)
+        raw_data_id = await self._persist(fetch_result)
         result = self._build_result_dict(symbol, fetch_result.price, fetch_result.timestamp)
-        self._write_to_cache(symbol, result)
+        await self._write_to_cache(symbol, result)
 
         if publish_to_kafka:
             await self._publish_to_kafka(fetch_result, raw_data_id)

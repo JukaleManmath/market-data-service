@@ -144,6 +144,7 @@ curl -X POST http://localhost:8000/prices/poll \
 
 ### Phase 1 — Bug Fixes + OOP/SOLID Refactor ✅
 
+
 **Goal:** Correct running service with clean, extensible architecture.
 
 **Bugs fixed:**
@@ -173,39 +174,39 @@ docker compose -f docker/docker-compose.yml logs ma-consumer | grep "MA Consumer
 
 ---
 
-### Phase 2 — Performance & Partitioning (Resume Match)
+### Phase 2 — Performance & Partitioning ✅
 
-**Goal:** PostgreSQL table partitioning, async SQLAlchemy, Kafka throughput tuning, async Redis.
+**Goal:** PostgreSQL table partitioning, async SQLAlchemy, async Redis, Kafka reliability tuning.
 
-**2a — PostgreSQL Partitioning** (`alembic-migrations/versions/xxxx_partition_price_points.py`):
-- Rename `price_points` → `price_points_old`
+**2a — PostgreSQL Partitioning** (`alembic-migrations/versions/b1c3e5f7a9d2_partition_price_points_by_month.py`):
+- Drop flat `price_points` (no historical data to migrate)
 - Recreate as `PARTITION BY RANGE (timestamp)` with composite PK `(id, timestamp)`
-- Create monthly child partitions 2024–2026 + catch-all `price_points_future`
-- Migrate data, create `idx_price_points_symbol_ts (symbol, timestamp DESC)`, drop old table
+- Create monthly child partitions 2026-03 through 2027-12 + catch-all `price_points_future`
+- Add `idx_price_points_symbol_ts (symbol, timestamp DESC)` on the parent
 - Update `app/models/price_points.py`: add `postgresql_partition_by` table arg
-
-> Always include a timestamp filter in queries — otherwise PostgreSQL scans all partitions.
 
 **2b — Async SQLAlchemy** (`app/database/session.py`):
 - Add `asyncpg`, `sqlalchemy[asyncio]` to requirements
-- Rewrite session to `create_async_engine` + `AsyncSession`
-- Keep `session_sync.py` (old sync engine) for the MA consumer (confluent-kafka is sync)
-- Update all DB-touching files to `await db.execute(select(...))`, `await db.commit()`
+- Add `create_async_engine` + `AsyncSessionLocal` + `get_async_db()` alongside the existing sync session
+- Sync `SessionLocal` kept — MA consumer uses confluent_kafka which is blocking
+- All API routes and polling worker updated to `await db.execute(select(...))`, `await db.commit()`
 
-**2c — Kafka tuning** (`app/kafka/producer.py`):
-```python
-'batch.size': 65536, 'linger.ms': 5, 'compression.type': 'lz4'
-```
-Replace `producer.flush()` per message with `producer.poll(0)`. Flush once on app shutdown.
-Increase `price-events` to 6 partitions. Add `anomaly-events` (3p) and `portfolio-events` (3p).
+**2c — Async Redis** (`app/core/redis.py`):
+- Swap `redis.Redis` → `redis.asyncio.Redis` (same package, same API, add `await`)
+- `_get_from_cache` and `_write_to_cache` in `PriceService` become async
 
-**2d — Async Redis** (`app/core/redis.py`):
-Switch to `redis.asyncio`. Improve key namespacing: `price:{SYMBOL}:{provider}`.
+**2d — Kafka tuning** (`app/kafka/producer.py`):
+- Add `acks="all"` and `retries=5` — no silent message loss on transient failures
+- Remove `producer.flush()` from `send_price_event` — was blocking the event loop on every message
+- Add graceful `producer.flush(timeout=10)` in `main.py` lifespan shutdown
 
 ```bash
 # Verify partitioning
-docker exec db psql -U $POSTGRES_USER -d $POSTGRES_DB -c "\d+ price_points"
-# → Partition key: RANGE (timestamp)
+docker exec postgres psql -U postgres -d marketdata -c "\d+ price_points"
+# → Partition key: RANGE (timestamp), 23 child tables listed
+
+# Verify data lands in current month's partition
+docker exec postgres psql -U postgres -d marketdata -c "SELECT COUNT(*) FROM price_points_2026_03;"
 ```
 
 ---

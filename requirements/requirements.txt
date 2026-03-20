@@ -22,7 +22,8 @@ watchfiles==1.0.5
 websockets==15.0.1
 confluent_kafka
 psycopg2-binary
-sqlalchemy
+sqlalchemy[asyncio]
+asyncpg
 alembic
 pydantic-settings
 redis

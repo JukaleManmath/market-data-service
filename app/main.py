@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api.prices import router as price_router
 from app.api.poll import router as poll_router
+from app.kafka.producer import producer
 from app.services.polling_worker_service import polling_worker
 
 
@@ -14,6 +15,9 @@ async def lifespan(app: FastAPI):
     # It runs forever, waking every 10s to fetch prices for due PollingJobs.
     asyncio.create_task(polling_worker())
     yield
+    # Flush any in-flight Kafka messages before the process exits.
+    # timeout=10 means: wait up to 10s for the broker to confirm, then give up.
+    producer.flush(timeout=10)
 
 
 app = FastAPI(lifespan=lifespan)
