@@ -243,7 +243,7 @@ curl "http://localhost:8000/insights/AAPL"
 
 ---
 
-### Phase 4 — Observability
+### Phase 4 — Observability ✅
 
 | File | Purpose |
 |------|---------|
@@ -252,6 +252,12 @@ curl "http://localhost:8000/insights/AAPL"
 | `app/api/health.py` | `GET /health` — `SELECT 1` + Redis `PING` → `{status, checks}` |
 
 Register all three in `app/main.py`.
+
+```bash
+# Verify
+curl http://localhost:8000/health
+# → {"status": "ok", "checks": {"postgres": "ok", "redis": "ok"}}
+```
 
 ---
 
@@ -459,7 +465,7 @@ curl http://localhost:8000/metrics | grep http_request_duration
 Phase 1  →  2 file edits            →  bugs fixed, service runs correctly
 Phase 2  →  ~8 edits + 1 migration  →  partitioned DB, async, tuned Kafka
 Phase 3  →  8 new files + 1 mig     →  anomaly detection + per-symbol Claude  ✅
-Phase 4  →  3 new files + 1 edit    →  structured logs, health, request IDs
+Phase 4  →  3 new files + 1 edit    →  structured logs, health, request IDs  ✅
 Phase 5  →  4 new files + 1 mig     →  portfolio management, live P&L tracking
 Phase 6  →  4 new files             →  RSI/MACD/BB, VaR, Sharpe, correlations
 Phase 7  →  3 new files + 2 edits   →  WebSocket real-time streaming + terminal dashboard (app/static/index.html)

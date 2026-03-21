@@ -14,16 +14,16 @@ Full 9-phase build plan is in [README.md](README.md).
 
 ---
 
-## Current State — Phase 3 Complete
+## Current State — Phase 4 Complete
 
-Anomaly detection (z-score + MA crossover) live, alerts table in DB, Claude per-symbol insights cached in Redis. Ready for Phase 4.
+JSON logging, RequestID middleware, and `/health` endpoint live. Ready for Phase 5.
 
 | Phase | What | Status |
 |-------|------|--------|
 | 1 | Fix 3 bugs + OOP/SOLID refactor (provider abstraction, PriceService, MovingAverageService) | **Done** |
 | 2 | DB partitioning, async SQLAlchemy, async Redis, Kafka tuning | **Done** |
 | 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | **Done** |
-| 4 | JSON logging, RequestID middleware, /health endpoint | Not started |
+| 4 | JSON logging, RequestID middleware, /health endpoint | **Done** |
 | 5 | Portfolio model, live P&L snapshot, position management | Not started |
 | 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | Not started |
 | 7 | WebSocket streaming via aiokafka broadcaster + minimal terminal UI (`app/static/index.html`) | Not started |
@@ -42,9 +42,13 @@ app/
     poll.py                            # POST /prices/poll
     alerts.py                          # GET /alerts/active, POST /alerts/{id}/resolve
     insights.py                        # GET /insights/{symbol} — Claude summary
+    health.py                          # GET /health — Postgres SELECT 1 + Redis PING
   core/
     config.py                          # Settings via pydantic-settings (reads .env)
     redis.py                           # Async redis_client (redis.asyncio.Redis)
+    logging.py                         # JSONFormatter + setup_logging() — structured JSON logs
+  middleware/
+    request_id.py                      # UUID per request, propagated as X-Request-ID header
   database/
     base.py                            # SQLAlchemy declarative Base (imports all models)
     session.py                         # Sync SessionLocal (MA consumer) + AsyncSessionLocal + get_async_db()
