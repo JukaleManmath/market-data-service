@@ -1,0 +1,69 @@
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ---------------------------------------------------------------------------
+# Portfolio
+# ---------------------------------------------------------------------------
+
+class CreatePortfolioRequest(BaseModel):
+    name: str
+
+
+class PortfolioResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Position
+# ---------------------------------------------------------------------------
+
+class AddPositionRequest(BaseModel):
+    symbol: str
+    quantity: float = Field(gt=0)
+    price: float = Field(gt=0, description="Price per share you are buying at")
+    provider: str = "finnhub"
+
+
+class PositionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    portfolio_id: UUID
+    symbol: str
+    provider: str
+    quantity: float
+    avg_cost_basis: float
+    is_active: bool
+    opened_at: datetime
+    closed_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# Snapshot
+# ---------------------------------------------------------------------------
+
+class PositionSnapshot(BaseModel):
+    symbol: str
+    provider: str
+    quantity: float
+    avg_cost_basis: float
+    current_price: float
+    market_value: float
+    unrealized_pnl: float
+    pnl_pct: float
+    weight: float
+
+
+class PortfolioSnapshot(BaseModel):
+    portfolio_id: UUID
+    portfolio_name: str
+    total_value: float
+    total_pnl: float
+    positions: list[PositionSnapshot]

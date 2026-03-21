@@ -57,3 +57,29 @@ async def send_price_event(
         )
     except Exception as e:
         logger.exception(f"[Kafka] Failed to enqueue message for {symbol}: {e}")
+
+
+async def send_portfolio_event(
+    event_type: str,
+    portfolio_id: str,
+    symbol: str,
+    quantity: float,
+    avg_cost_basis: float,
+) -> None:
+    """Enqueue a portfolio change event onto the portfolio-events topic."""
+    message = {
+        "event_type": event_type,
+        "portfolio_id": portfolio_id,
+        "symbol": symbol,
+        "quantity": quantity,
+        "avg_cost_basis": avg_cost_basis,
+    }
+    try:
+        producer.produce(
+            topic="portfolio-events",
+            key=portfolio_id,
+            value=json.dumps(message),
+            callback=_delivery_report,
+        )
+    except Exception as e:
+        logger.exception(f"[Kafka] Failed to enqueue portfolio event for {portfolio_id}: {e}")

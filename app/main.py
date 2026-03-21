@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.alerts import router as alerts_router
+from app.api.portfolios import router as portfolios_router
 from app.api.health import router as health_router
 from app.api.insights import router as insights_router
 from app.api.poll import router as poll_router
@@ -36,3 +37,4 @@ app.include_router(price_router)
 app.include_router(poll_router)
 app.include_router(alerts_router)
 app.include_router(insights_router)
+app.include_router(portfolios_router)

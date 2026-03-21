@@ -265,22 +265,28 @@ curl http://localhost:8000/health
 
 **Goal:** Users define holdings, track live P&L, see position weights. Gives every downstream feature (AI, alerts, risk) the portfolio context it needs.
 
-New models (`alembic-migrations/versions/xxxx_add_portfolio_tables.py`):
-- `Portfolio` — id, name, owner_id, created_at
-- `Position` — id, portfolio_id, symbol, quantity, avg_cost_basis, opened_at, closed_at, is_active
+New models (`alembic-migrations/versions/e5f6a7b8c9d0_add_portfolio_tables.py`):
+- `Portfolio` — id, name, created_at
+- `Position` — id, portfolio_id, symbol, provider, quantity, avg_cost_basis, opened_at, closed_at, is_active
 
 **`app/services/portfolio_service.py`** — core logic:
-- `get_portfolio_snapshot()` — fetches current prices from Redis, computes market_value, unrealized_pnl, pnl_pct, weight per position
-- `update_position()` — weighted average cost basis on each buy
-- `close_position()` — records realized P&L
+- `get_snapshot()` — fetches current prices from Redis (falls back to DB), computes market_value, unrealized_pnl, pnl_pct, weight per position
+- `add_or_update_position()` — weighted average cost basis on each buy
+- `close_position()` — marks position inactive, sets closed_at
 
-On any position change, publish to `portfolio-events` Kafka topic so Phase 6 risk engine can react.
+On any position change, publishes to `portfolio-events` Kafka topic so Phase 6 risk engine can react.
 
 ```bash
-curl -X POST http://localhost:8000/portfolios -d '{"name":"Tech Portfolio"}'
-curl -X POST http://localhost:8000/portfolios/1/positions -d '{"symbol":"AAPL","quantity":100,"price":175.00}'
-curl http://localhost:8000/portfolios/1/snapshot
-# → {total_value, total_pnl, positions: [{symbol, current_price, pnl, weight}]}
+curl -X POST http://localhost:8000/portfolios \
+  -H "Content-Type: application/json" -d '{"name":"Tech Portfolio"}'
+
+curl -X POST "http://localhost:8000/portfolios/{id}/positions" \
+  -H "Content-Type: application/json" -d '{"symbol":"AAPL","quantity":100,"price":175.00}'
+
+curl "http://localhost:8000/portfolios/{id}/snapshot"
+# → {portfolio_id, portfolio_name, total_value, total_pnl, positions: [{symbol, current_price, unrealized_pnl, pnl_pct, weight}]}
+
+curl -X DELETE "http://localhost:8000/portfolios/{id}/positions/{pos_id}"
 ```
 
 ---
@@ -466,7 +472,7 @@ Phase 1  →  2 file edits            →  bugs fixed, service runs correctly
 Phase 2  →  ~8 edits + 1 migration  →  partitioned DB, async, tuned Kafka
 Phase 3  →  8 new files + 1 mig     →  anomaly detection + per-symbol Claude  ✅
 Phase 4  →  3 new files + 1 edit    →  structured logs, health, request IDs  ✅
-Phase 5  →  4 new files + 1 mig     →  portfolio management, live P&L tracking
+Phase 5  →  6 new files + 3 edits   →  portfolio management, live P&L tracking  ✅
 Phase 6  →  4 new files             →  RSI/MACD/BB, VaR, Sharpe, correlations
 Phase 7  →  3 new files + 2 edits   →  WebSocket real-time streaming + terminal dashboard (app/static/index.html)
 Phase 8  →  3 new files + 1 edit    →  Claude portfolio intelligence + Q&A

@@ -14,9 +14,9 @@ Full 9-phase build plan is in [README.md](README.md).
 
 ---
 
-## Current State — Phase 4 Complete
+## Current State — Phase 5 Complete
 
-JSON logging, RequestID middleware, and `/health` endpoint live. Ready for Phase 5.
+Portfolio management layer live. Portfolios, positions, live P&L snapshot. Ready for Phase 6.
 
 | Phase | What | Status |
 |-------|------|--------|
@@ -24,7 +24,7 @@ JSON logging, RequestID middleware, and `/health` endpoint live. Ready for Phase
 | 2 | DB partitioning, async SQLAlchemy, async Redis, Kafka tuning | **Done** |
 | 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | **Done** |
 | 4 | JSON logging, RequestID middleware, /health endpoint | **Done** |
-| 5 | Portfolio model, live P&L snapshot, position management | Not started |
+| 5 | Portfolio model, live P&L snapshot, position management | **Done** |
 | 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | Not started |
 | 7 | WebSocket streaming via aiokafka broadcaster + minimal terminal UI (`app/static/index.html`) | Not started |
 | 8 | Claude portfolio intelligence + natural language Q&A | Not started |
@@ -43,6 +43,7 @@ app/
     alerts.py                          # GET /alerts/active, POST /alerts/{id}/resolve
     insights.py                        # GET /insights/{symbol} — Claude summary
     health.py                          # GET /health — Postgres SELECT 1 + Redis PING
+    portfolios.py                      # POST /portfolios, POST/DELETE /portfolios/{id}/positions, GET /portfolios/{id}/snapshot
   core/
     config.py                          # Settings via pydantic-settings (reads .env)
     redis.py                           # Async redis_client (redis.asyncio.Redis)
@@ -53,7 +54,7 @@ app/
     base.py                            # SQLAlchemy declarative Base (imports all models)
     session.py                         # Sync SessionLocal (MA consumer) + AsyncSessionLocal + get_async_db()
   kafka/
-    producer.py                        # send_price_event() → price-events topic
+    producer.py                        # send_price_event() → price-events topic; send_portfolio_event() → portfolio-events topic
     consumer.py                        # start_consumer() — Kafka loop, delegates to MovingAverageService
     anomaly_consumer.py                # start_consumer() — anomaly-consumer-group, delegates to AnomalyDetector
   models/
@@ -62,16 +63,20 @@ app/
     raw_market_data.py                 # RawMarketData — raw JSON from external APIs
     moving_average.py                  # MovingAverage — 5-pt MA results
     alerts.py                          # Alert — anomaly_type, severity, price, z_score, fast_ma, slow_ma, resolved
+    portfolio.py                       # Portfolio — id, name, created_at
+    position.py                        # Position — id, portfolio_id, symbol, provider, quantity, avg_cost_basis, opened_at, closed_at, is_active
   schemas/
     price.py                           # PriceResponse
     poll.py                            # PollingRequest / PollingResponse
     alerts.py                          # AlertResponse
+    portfolio.py                       # CreatePortfolioRequest, PortfolioResponse, AddPositionRequest, PositionResponse, PortfolioSnapshot
   services/
     price_service.py                   # PriceService — 3-tier fetch orchestrator (injected deps)
     polling_worker_service.py          # polling_worker() — background task, builds PriceService per job
     moving_average_service.py          # MovingAverageService — MA calc + dedup persistence
     anomaly_detector.py                # AnomalyDetector — z-score (N=20, 3σ/4σ) + MA divergence (0.5%)
     ai_insights.py                     # AIInsightsService — AsyncAnthropic claude-sonnet-4-6, Redis 5 min cache
+    portfolio_service.py               # PortfolioService — create_portfolio, add_or_update_position, close_position, get_snapshot
     providers/
       base.py                          # BaseProvider ABC + PriceFetchResult dataclass
       finnhub.py                       # FinnhubProvider(BaseProvider)
@@ -154,7 +159,7 @@ MA Consumer (separate container, price-events topic):
 
 **Phase 2 done:** monthly `RANGE` partitioning on `price_points(timestamp)`. Partitions exist for 2026-03 through 2027-12 plus `price_points_future`.
 **Phase 3 done:** `alerts` table with `alertseverity` and `anomalytype` Postgres enums + `resolved` boolean. Migration uses raw `op.execute()` SQL throughout — `op.create_table()` with `create_type=False` was silently ignored by SQLAlchemy, causing `DuplicateObject` errors.
-**Phase 5 adds:** `portfolios` and `positions` tables.
+**Phase 5 done:** `portfolios` and `positions` tables. Migration `e5f6a7b8c9d0_add_portfolio_tables.py` uses raw `op.execute()` SQL (same pattern as alerts).
 
 ---
 
