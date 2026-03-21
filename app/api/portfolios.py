@@ -75,6 +75,17 @@ async def close_position(
     return position
 
 
+@router.delete("/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_portfolio(
+    portfolio_id: UUID,
+    service: PortfolioService = Depends(_service),
+) -> None:
+    try:
+        await service.delete_portfolio(portfolio_id=portfolio_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
 @router.get("/{portfolio_id}/snapshot", response_model=PortfolioSnapshot)
 async def get_snapshot(
     portfolio_id: UUID,

@@ -24,6 +24,10 @@ This will build all images, start all containers, and apply database migrations 
 
 > **Note:** The `--env-file .env` flag is required because the compose file lives in `docker/` — without it, Docker Compose won't find the `.env` at the project root.
 
+## Dashboard
+
+![Dashboard](docs/images/Dashboard.png)
+
 ## Service Access Points
 
 | Service | URL | Purpose |
@@ -119,23 +123,22 @@ curl -X POST http://localhost:8000/prices/poll \
 |--------|----------|-------|-------------|
 | GET | `/prices/latest` | 1 | Fetch current price (Redis → DB → API) |
 | POST | `/prices/poll` | 1 | Create periodic polling job |
+| DELETE | `/prices/poll/{job_id}` | 7 | Stop and delete a polling job |
 | GET | `/health` | 4 | PostgreSQL + Redis health check |
-| GET | `/alerts/active` | 3 | Active anomaly alerts |
+| GET | `/alerts/active` | 3 | Active anomaly alerts (symbol/provider optional) |
 | POST | `/alerts/{id}/resolve` | 3 | Resolve an alert |
-| GET | `/insights/{symbol}` | 3 | Claude summary for one symbol |
+| GET | `/insights/{symbol}` | 3 | Claude summary for one symbol (cached 5 min) |
 | POST | `/portfolios` | 5 | Create portfolio |
-| GET | `/portfolios/{id}/snapshot` | 5 | Live P&L (uses Redis prices) |
-| POST | `/portfolios/{id}/positions` | 5 | Add/update position |
-| DELETE | `/portfolios/{id}/positions/{sym}` | 5 | Close position |
-| GET | `/portfolios/{id}/history` | 5 | Historical P&L (last N days) |
-| GET | `/portfolios/{id}/risk` | 6 | VaR, Sharpe, beta, max drawdown |
-| GET | `/portfolios/{id}/correlation` | 6 | Correlation matrix (heatmap-ready JSON) |
-| GET | `/analytics/{symbol}/indicators` | 6 | RSI, MACD, Bollinger Bands |
-| GET | `/analytics/{symbol}/signals` | 6 | Composite BUY/SELL/HOLD signal |
+| DELETE | `/portfolios/{id}` | 7 | Delete portfolio and all its positions |
+| GET | `/portfolios/{id}/snapshot` | 5 | Live P&L snapshot (uses Redis prices) |
+| POST | `/portfolios/{id}/positions` | 5 | Add/update position (weighted avg cost basis) |
+| DELETE | `/portfolios/{id}/positions/{pos_id}` | 5 | Close a position |
+| GET | `/analytics/{symbol}/indicators` | 6 | RSI, MACD, Bollinger Bands + BUY/SELL/HOLD signal |
+| GET | `/analytics/portfolios/{id}/risk` | 6 | VaR, Sharpe, max drawdown, correlation matrix |
 | WS | `/ws/prices/{symbol}` | 7 | Real-time price stream (WebSocket) |
+| GET | `/ui` | 7 | Terminal dashboard (StaticFiles) |
 | GET | `/portfolios/{id}/analysis` | 8 | Claude full portfolio analysis |
 | POST | `/portfolios/{id}/ask` | 8 | Natural language Q&A |
-| GET | `/market/regime` | 8 | Market regime (risk-on/off/neutral) |
 | GET | `/metrics` | 9 | Prometheus metrics scrape |
 
 ---
@@ -291,9 +294,17 @@ curl -X DELETE "http://localhost:8000/portfolios/{id}/positions/{pos_id}"
 
 ---
 
-### Phase 6 — Technical Analysis & Risk Metrics
+### Phase 6 — Technical Analysis & Risk Metrics ✅
 
 **Goal:** Full indicator suite (RSI, MACD, Bollinger Bands) + portfolio-level risk (VaR, Sharpe, correlation matrix).
+
+| File | Purpose |
+|------|---------|
+| `app/services/technical_analysis.py` | RSI (14-period), MACD (12/26/9 EMA), Bollinger Bands (20-period, 2σ) |
+| `app/services/signal_generator.py` | Rule-based voting → BUY/SELL/HOLD + confidence score + reasons list |
+| `app/services/risk_engine.py` | Parametric VaR (95%), Sharpe (annualised), max drawdown, correlation matrix |
+| `app/api/analytics.py` | Two endpoints wired to the services above |
+| `app/schemas/analytics.py` | `IndicatorResponse`, `RiskResponse` |
 
 **`app/services/technical_analysis.py`** — computed from `price_points` table:
 
@@ -303,86 +314,90 @@ curl -X DELETE "http://localhost:8000/portfolios/{id}/positions/{pos_id}"
 | MACD | 12/26/9 EMA | Line, signal, histogram |
 | Bollinger Bands | 20 periods, 2σ | Upper, middle, lower band |
 
-> Since we only have `price` (no OHLCV), ATR uses `abs(price[i] - price[i-1])` as true range approximation. Documented in service docstring.
+> We only have `price` (no OHLCV). All indicators use close price only. Indicators return `null` when insufficient history exists — minimum 15 for RSI, 20 for Bollinger, 35 for MACD.
 
-**`app/services/risk_engine.py`** — requires 30+ days of history, uses `numpy` + `scipy`:
-```python
-# 1. Fetch price series for each position
-# 2. Compute daily log returns per symbol
-# 3. Build covariance matrix
-# 4. Portfolio variance = w.T @ cov_matrix @ w
-# 5. Parametric VaR = portfolio_value * z_score * sqrt(variance)
-# 6. Sharpe = (mean_return - risk_free_rate) / std_return * sqrt(252)
-# 7. Max drawdown = (peak - trough) / peak over lookback window
+**`app/services/risk_engine.py`** — requires 30+ price points per symbol, uses `numpy` + `scipy`:
+```
+1. Fetch price series for each active position (up to 252 points)
+2. Compute daily log returns per symbol
+3. Build covariance matrix
+4. Portfolio variance = w.T @ cov_matrix @ w
+5. Parametric VaR = portfolio_value * z_score * sqrt(variance)   [95% confidence]
+6. Sharpe = (mean_return - risk_free_rate) / std_return * sqrt(252)
+7. Max drawdown = worst (peak - trough) / peak over the full history
+8. Correlation matrix — np.corrcoef, handles single-symbol edge case
 ```
 
-**`app/services/signal_generator.py`** — composite signal:
-- RSI > 70 → overbought, RSI < 30 → oversold
-- MACD line crosses signal → momentum shift
-- Price near Bollinger upper → potential reversal
-- Output: `{signal: "BUY|SELL|HOLD", confidence: 0–1, reasons: [...]}`
+**`app/services/signal_generator.py`** — rule-based voting:
+- RSI < 30 → +1 BUY (oversold), RSI > 70 → +1 SELL (overbought)
+- MACD histogram > 0 → +1 BUY (bullish momentum), < 0 → +1 SELL
+- Price ≤ lower Bollinger → +1 BUY, price ≥ upper Bollinger → +1 SELL
+- Confidence = winning_votes / total_votes_cast. Tie → HOLD.
 
-Add `numpy`, `scipy` to requirements.txt.
+Added `numpy`, `scipy` to `requirements/requirements.txt`.
 
 ```bash
-curl "http://localhost:8000/analytics/AAPL/indicators"
-# → {rsi: 58.3, macd: {line: 2.1, signal: 1.8, histogram: 0.3}, bollinger: {...}}
+curl "http://localhost:8000/analytics/AAPL/indicators?provider=finnhub"
+# → {rsi: 22.19, macd: {line: 0.13, signal: 2.22, histogram: -2.08}, bollinger: {...}, signal: "HOLD", confidence: 0.0, reasons: [...]}
 
-curl "http://localhost:8000/portfolios/1/risk"
-# → {VaR_1day: 1250.00, sharpe: 1.34, max_drawdown: -0.12, correlation_matrix: {...}}
+curl "http://localhost:8000/analytics/portfolios/{id}/risk"
+# → {var_1day_95: 230.46, sharpe_ratio: 1.34, max_drawdown: -0.06, correlation_matrix: {...}}
 ```
 
 ---
 
-### Phase 7 — Real-time WebSocket Streaming + Terminal Dashboard
+### Phase 7 — Real-time WebSocket Streaming + Terminal Dashboard ✅
 
-**Goal:** Push price ticks to subscribers instantly via WebSocket instead of REST polling. Add a minimal terminal-style browser dashboard so all results are visible without curling endpoints.
+**Goal:** Push price ticks to subscribers instantly via WebSocket. Add a terminal-style browser dashboard exposing all API routes without curling endpoints.
 
-**`app/core/websocket_manager.py`**:
+New files:
+
+| File | Purpose |
+|------|---------|
+| `app/core/websocket_manager.py` | `ConnectionManager` — `defaultdict(list)` mapping symbol → connected sockets. `subscribe()`, `unsubscribe()`, `broadcast()`. Module-level singleton `manager`. |
+| `app/core/kafka_broadcaster.py` | `start_broadcaster()` — asyncio task using `aiokafka.AIOKafkaConsumer` reading `price-events`, calls `await manager.broadcast()` per message. `group_id="websocket-broadcaster"`, `auto_offset_reset="latest"`. |
+| `app/api/stream.py` | `WS /ws/prices/{symbol}` — accepts connection via `manager.subscribe()`, loops on `receive_text()` to keep alive, unsubscribes on disconnect. |
+| `app/static/index.html` | Single-file terminal dashboard. Vanilla JS, no framework, no build step. Fixed viewport (no page scroll). Served at `/ui`. |
+
+**`main.py` additions:**
 ```python
-class ConnectionManager:
-    connections: dict[str, list[WebSocket]]  # symbol → connected sockets
-    async def subscribe(symbol, ws)
-    async def broadcast(symbol, message)
+asyncio.create_task(start_broadcaster())   # alongside polling_worker()
+app.include_router(stream_router)
+app.mount("/ui", StaticFiles(directory="app/static", html=True), name="static")
 ```
 
-**`app/core/kafka_broadcaster.py`** — background asyncio task (started in `main.py` lifespan):
-- Uses `aiokafka` (async Kafka consumer) to read `price-events`
-- On each message: `await manager.broadcast(symbol, enriched_data)`
+**Dashboard panels** (all 14 routes covered):
+- Polling Jobs — `POST /prices/poll`, `DELETE /prices/poll/{job_id}` (× per job tag)
+- Price Lookup — `GET /prices/latest`
+- Live Prices — `WS /ws/prices/{symbol}`
+- Portfolio Manager — `POST /portfolios`, `DELETE /portfolios/{id}`, `POST/DELETE /portfolios/{id}/positions`, `GET /portfolios/{id}/snapshot`
+- Active Alerts — `GET /alerts/active`, `POST /alerts/{id}/resolve`
+- Technical Indicators — `GET /analytics/{symbol}/indicators`
+- Portfolio Risk — `GET /analytics/portfolios/{id}/risk` + Check Data Points button
+- Claude Insights — `GET /insights/{symbol}`
+- Health dot — `GET /health` (title bar, every 30s)
 
-**`app/api/stream.py`** — `WS /ws/prices/{symbol}`
+**Bugs fixed during Phase 7:**
 
-Message pushed to clients:
-```json
-{
-  "symbol": "AAPL", "price": 178.42, "timestamp": "...",
-  "moving_average_5": 177.91, "signal": "HOLD"
-}
-```
+| Bug | Fix |
+|-----|-----|
+| `DELETE /portfolios/{id}` → 500 FK violation | `delete_portfolio()` now hard-deletes position rows before deleting portfolio |
+| Close button broken — empty position ID | Added `position_id: UUID` to `PositionSnapshot` schema and `get_snapshot()` |
+| `pnl_pct` 100× too large | Service returns ratio (0.389); dashboard multiplies by 100 for display |
+| `GET /alerts/active` → 422 | `symbol` and `provider` query params made optional |
 
-**`app/static/index.html`** — single HTML file, no framework, no build step. Served by FastAPI via `StaticFiles`. Dark background, monospace font, terminal aesthetic.
-
-What it shows:
-- Live price ticker per symbol — subscribes to `ws://localhost:8000/ws/prices/{symbol}`
-- Active alerts table — polls `GET /alerts/active` every 10s
-- Portfolio snapshot — polls `GET /portfolios/{id}/snapshot` every 10s
-- Claude insight output — fetches `GET /insights/{symbol}` on demand
-
-Served at `http://localhost:8000/ui`. Two lines added to `main.py`:
-```python
-from fastapi.staticfiles import StaticFiles
-app.mount("/ui", StaticFiles(directory="app/static"), name="static")
-```
-
-Add `aiokafka` to requirements.txt.
+Added `aiokafka` to `requirements/requirements.txt`.
 
 ```bash
-# Test WebSocket with wscat (npm install -g wscat)
+# Test WebSocket
 wscat -c "ws://localhost:8000/ws/prices/AAPL"
-# → Receives a message every time AAPL is polled
+# → JSON message every polling interval
 
 # Open dashboard
 open http://localhost:8000/ui
+
+# Stop a polling job
+curl -X DELETE "http://localhost:8000/prices/poll/{job_id}"
 ```
 
 ---
@@ -473,8 +488,8 @@ Phase 2  →  ~8 edits + 1 migration  →  partitioned DB, async, tuned Kafka
 Phase 3  →  8 new files + 1 mig     →  anomaly detection + per-symbol Claude  ✅
 Phase 4  →  3 new files + 1 edit    →  structured logs, health, request IDs  ✅
 Phase 5  →  6 new files + 3 edits   →  portfolio management, live P&L tracking  ✅
-Phase 6  →  4 new files             →  RSI/MACD/BB, VaR, Sharpe, correlations
-Phase 7  →  3 new files + 2 edits   →  WebSocket real-time streaming + terminal dashboard (app/static/index.html)
+Phase 6  →  5 new files             →  RSI/MACD/BB, VaR, Sharpe, correlations  ✅
+Phase 7  →  3 new files + 3 edits   →  WebSocket real-time streaming + terminal dashboard  ✅
 Phase 8  →  3 new files + 1 edit    →  Claude portfolio intelligence + Q&A
 Phase 9  →  5 new files + 1 edit    →  rate limiting, auth, Prometheus, webhooks
 ```
@@ -493,7 +508,9 @@ Phase 9  →  5 new files + 1 edit    →  rate limiting, auth, Prometheus, webh
 | `app/services/moving_average_service.py` | Phase 1 — MA calc + dedup persistence |
 | `app/database/session.py` | Phase 2 core — all DB files depend on it |
 | `app/services/portfolio_service.py` | Phase 5 core — all portfolio logic |
-| `app/services/risk_engine.py` | Phase 6 core — numpy VaR/Sharpe |
+| `app/services/technical_analysis.py` | Phase 6 — RSI, MACD, Bollinger Bands |
+| `app/services/signal_generator.py` | Phase 6 — BUY/SELL/HOLD voting logic |
+| `app/services/risk_engine.py` | Phase 6 core — numpy VaR/Sharpe/drawdown/correlation |
 | `app/core/websocket_manager.py` | Phase 7 core — in-memory pub/sub |
 | `app/services/portfolio_intelligence.py` | Phase 8 core — Claude context builder |
 | `docker/docker-compose.yml` | Updated each phase |

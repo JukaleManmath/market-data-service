@@ -28,3 +28,6 @@ alembic
 pydantic-settings
 redis
 anthropic
+numpy
+scipy
+aiokafka

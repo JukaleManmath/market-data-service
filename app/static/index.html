@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Market Data Terminal</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0d0d0d;
+      --surface:   #111111;
+      --border:    #2a2a2a;
+      --green:     #00ff88;
+      --green-dim: #00cc66;
+      --red:       #ff4466;
+      --yellow:    #ffcc00;
+      --blue:      #4da6ff;
+      --muted:     #555;
+      --text:      #cccccc;
+      --font:      'Courier New', Courier, monospace;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      background: #060606;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 12px;
+    }
+
+    /* ── Terminal window fills viewport ── */
+    .terminal-window {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: none;
+      overflow: hidden;
+    }
+
+    /* ── Title bar ── */
+    .titlebar {
+      background: #1a1a1a;
+      padding: 7px 14px;
+      display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+    .dot-red    { background: #ff5f57; }
+    .dot-yellow { background: #febc2e; }
+    .dot-green  { background: #28c840; }
+    .titlebar-label { flex: 1; text-align: center; color: var(--muted); font-size: 11px; letter-spacing: 0.08em; }
+    .titlebar-right { display: flex; align-items: center; gap: 14px; }
+    .health-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; }
+    .health-dot.ok  { background: var(--green); }
+    .health-dot.err { background: var(--red); }
+    .titlebar-clock { color: var(--muted); font-size: 11px; }
+
+    /* ── Dashboard — 4-row grid filling remaining height ── */
+    .dashboard {
+      flex: 1;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: 120px 1fr 1fr 120px;
+      gap: 6px;
+      padding: 6px;
+    }
+
+    /* ── Rows ── */
+    .row { display: grid; gap: 6px; overflow: hidden; }
+    .row-2 { grid-template-columns: 1fr 1fr; }
+    .row-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+    /* ── Panel ── */
+    .panel {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel-header {
+      background: #161616; border-bottom: 1px solid var(--border);
+      padding: 5px 10px; display: flex; align-items: center; justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .panel-title { color: var(--green); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
+    .panel-status { font-size: 10px; color: var(--muted); }
+    .panel-body { padding: 7px 10px; flex: 1; overflow-y: auto; overflow-x: hidden; }
+
+    /* ── Controls ── */
+    input, select {
+      background: #1a1a1a; border: 1px solid var(--border);
+      color: var(--text); font-family: var(--font); font-size: 11px;
+      padding: 3px 6px; border-radius: 3px;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--green); }
+    .uppercase { text-transform: uppercase; }
+
+    .btn {
+      background: transparent; border: 1px solid var(--green); color: var(--green);
+      font-family: var(--font); font-size: 10px; padding: 3px 10px; border-radius: 3px;
+      cursor: pointer; letter-spacing: 0.05em; transition: background 0.1s; white-space: nowrap;
+    }
+    .btn:hover     { background: rgba(0,255,136,0.08); }
+    .btn-red       { border-color: var(--red);    color: var(--red);    }
+    .btn-red:hover   { background: rgba(255,68,102,0.08); }
+    .btn-blue      { border-color: var(--blue);   color: var(--blue);   }
+    .btn-blue:hover  { background: rgba(77,166,255,0.08); }
+    .btn-yellow    { border-color: var(--yellow); color: var(--yellow); }
+    .btn-yellow:hover{ background: rgba(255,204,0,0.08); }
+    .btn-sm { padding: 1px 6px; font-size: 10px; }
+
+    .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 5px; }
+    .controls label { color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .sep { border: none; border-top: 1px solid var(--border); margin: 5px 0; }
+    .hint { color: var(--muted); font-size: 10px; margin-top: 3px; }
+
+    /* ── Job tags ── */
+    .job-list { display: flex; flex-wrap: wrap; gap: 4px; min-height: 20px; }
+    .job-tag {
+      background: #1a1a1a; border: 1px solid var(--green-dim);
+      border-radius: 3px; padding: 1px 5px; font-size: 10px; color: var(--green-dim);
+      display: flex; align-items: center; gap: 4px;
+    }
+    .job-tag-remove {
+      background: none; border: none; color: var(--muted);
+      cursor: pointer; font-size: 12px; padding: 0; line-height: 1;
+    }
+    .job-tag-remove:hover { color: var(--red); }
+
+    /* ── Ticker cards ── */
+    .tickers { display: flex; flex-wrap: wrap; gap: 6px; min-height: 30px; }
+    .ticker-card {
+      background: #161616; border: 1px solid var(--border);
+      border-radius: 4px; padding: 5px 10px; min-width: 130px; position: relative;
+    }
+    .ticker-card.live { border-color: var(--green-dim); }
+    .ticker-card.live::after {
+      content: ''; position: absolute; top: 5px; right: 5px;
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--green); animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.15} }
+    .ticker-symbol { color: var(--blue); font-size: 10px; letter-spacing: 0.1em; }
+    .ticker-price  { font-size: 16px; color: var(--green); margin: 2px 0 1px; }
+    .ticker-meta   { color: var(--muted); font-size: 10px; }
+    .ticker-remove {
+      position: absolute; top: 3px; right: 8px;
+      background: none; border: none; color: var(--muted);
+      font-size: 13px; cursor: pointer; padding: 0;
+    }
+    .ticker-card.live .ticker-remove { right: 16px; }
+    .ticker-remove:hover { color: var(--red); }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    th {
+      color: var(--muted); text-align: left; padding: 2px 6px;
+      border-bottom: 1px solid var(--border); font-weight: normal;
+      font-size: 10px; white-space: nowrap;
+      position: sticky; top: 0; background: var(--bg); z-index: 1;
+    }
+    td { padding: 3px 6px; border-bottom: 1px solid #1a1a1a; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    .pnl-pos { color: var(--green); }
+    .pnl-neg { color: var(--red); }
+    .sev-high   { color: var(--red); }
+    .sev-medium { color: var(--yellow); }
+    .sev-low    { color: var(--text); }
+
+    /* ── Portfolio summary strip ── */
+    .port-summary {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      padding: 5px 0 6px; border-bottom: 1px solid var(--border); margin-bottom: 5px;
+    }
+    .kv { display: flex; flex-direction: column; }
+    .kv .k { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em; }
+    .kv .v { font-size: 13px; margin-top: 1px; }
+
+    /* ── Portfolio badge ── */
+    .port-active-badge {
+      background: #161616; border: 1px solid var(--green-dim);
+      border-radius: 4px; padding: 5px 10px;
+      display: none; margin-bottom: 6px;
+    }
+    .port-active-badge .pname { color: var(--blue); font-size: 12px; }
+    .port-active-badge .pid   { color: var(--muted); font-size: 9px; word-break: break-all; margin-top: 1px; }
+    .port-active-badge .pactions { margin-top: 5px; display: flex; gap: 6px; }
+
+    /* ── Switch-portfolio form (shown after clicking Change) ── */
+    .port-switch-section {
+      display: none; background: #161616; border: 1px solid var(--border);
+      border-radius: 4px; padding: 6px 10px; margin-bottom: 6px;
+    }
+    .port-switch-section .sw-label { color: var(--muted); font-size: 10px; margin-bottom: 4px; }
+
+    /* ── Metric cards ── */
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px,1fr)); gap: 5px; margin-top: 5px; }
+    .metric-card { background: #161616; border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; }
+    .metric-card .mk { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em; }
+    .metric-card .mv { font-size: 14px; margin-top: 2px; }
+    .metric-card .mv.up   { color: var(--green); }
+    .metric-card .mv.down { color: var(--red); }
+    .metric-card .mv.warn { color: var(--yellow); }
+
+    .signal-badge {
+      display: inline-block; padding: 2px 10px; border-radius: 3px;
+      font-size: 12px; font-weight: bold; letter-spacing: 0.1em; margin-top: 5px;
+    }
+    .signal-badge.buy  { background: rgba(0,255,136,0.12); color: var(--green); border: 1px solid var(--green-dim); }
+    .signal-badge.sell { background: rgba(255,68,102,0.12); color: var(--red);   border: 1px solid var(--red); }
+    .signal-badge.hold { background: rgba(255,204,0,0.10);  color: var(--yellow);border: 1px solid var(--yellow); }
+
+    /* ── Insights ── */
+    .insights-output {
+      background: #0a0a0a; border: 1px solid var(--border); border-radius: 3px;
+      padding: 7px; height: 60px; overflow-y: auto;
+      line-height: 1.6; white-space: pre-wrap; font-size: 11px; margin-top: 5px;
+    }
+
+    /* ── Price result ── */
+    .price-result {
+      margin-top: 5px; background: #161616; border: 1px solid var(--border);
+      border-radius: 3px; padding: 6px 10px; display: none;
+    }
+    .price-result .big  { font-size: 18px; color: var(--green); }
+    .price-result .meta { color: var(--muted); font-size: 10px; margin-top: 1px; }
+
+    /* ── Inline notice ── */
+    .notice { color: var(--muted); font-size: 10px; font-style: italic; }
+
+    .muted   { color: var(--muted); }
+    .err     { color: var(--red); }
+    .ok      { color: var(--green); }
+    .loading { color: var(--yellow); }
+  </style>
+</head>
+<body>
+<div class="terminal-window">
+
+  <!-- ── Title bar ── -->
+  <div class="titlebar">
+    <span class="dot dot-red"></span>
+    <span class="dot dot-yellow"></span>
+    <span class="dot dot-green"></span>
+    <span class="titlebar-label">market-data-service &mdash; portfolio intelligence terminal</span>
+    <div class="titlebar-right">
+      <span>
+        <span class="health-dot" id="health-dot"></span>
+        <span id="health-label" style="font-size:10px;color:var(--muted)">checking…</span>
+      </span>
+      <span class="titlebar-clock" id="clock"></span>
+    </div>
+  </div>
+
+  <div class="dashboard">
+
+    <!-- ════ ROW 1 — Polling | Price Lookup | Live Tickers ════ -->
+    <div class="row row-3">
+
+      <!-- Polling Jobs -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9654; Polling Jobs</span>
+          <span class="panel-status" id="poll-status">no jobs</span>
+        </div>
+        <div class="panel-body">
+          <div class="controls">
+            <label>Sym</label>
+            <input id="poll-sym" class="uppercase" placeholder="AAPL" maxlength="10" style="width:55px"
+              onkeydown="if(event.key==='Enter')startPolling()" />
+            <select id="poll-provider">
+              <option value="finnhub">finnhub</option>
+              <option value="alpha_vantage">alpha_vantage</option>
+            </select>
+            <label>s</label>
+            <input id="poll-interval" type="number" value="30" min="10" style="width:42px" />
+            <button class="btn" onclick="startPolling()">Start</button>
+          </div>
+          <div class="job-list" id="job-list">
+            <span class="muted" style="font-size:10px">No jobs yet. Start one above.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Price Lookup -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9906; Price Lookup</span>
+          <span class="panel-status">GET /prices/latest</span>
+        </div>
+        <div class="panel-body">
+          <div class="controls">
+            <label>Sym</label>
+            <input id="lookup-sym" class="uppercase" placeholder="AAPL" maxlength="10" style="width:55px"
+              onkeydown="if(event.key==='Enter')lookupPrice()" />
+            <select id="lookup-provider">
+              <option value="finnhub">finnhub</option>
+              <option value="alpha_vantage">alpha_vantage</option>
+            </select>
+            <button class="btn btn-blue" onclick="lookupPrice()">Fetch</button>
+          </div>
+          <div class="price-result" id="price-result">
+            <div class="big" id="lookup-price">—</div>
+            <div class="meta" id="lookup-meta"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Tickers -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9632; Live Prices</span>
+          <span class="panel-status" id="ws-status">disconnected</span>
+        </div>
+        <div class="panel-body">
+          <div class="controls">
+            <label>Sym</label>
+            <input id="sym-input" class="uppercase" placeholder="AAPL" maxlength="10" style="width:55px"
+              onkeydown="if(event.key==='Enter')addTicker()" />
+            <button class="btn" onclick="addTicker()">+ Subscribe</button>
+            <span class="notice">requires a polling job</span>
+          </div>
+          <div class="tickers" id="tickers">
+            <span class="muted" style="font-size:10px">No subscriptions yet.</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ════ ROW 2 — Portfolio | Alerts ════ -->
+    <div class="row row-2">
+
+      <!-- Portfolio Manager -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9776; Portfolio Manager</span>
+          <span class="panel-status" id="port-status">no portfolio loaded</span>
+        </div>
+        <div class="panel-body">
+
+          <!-- Active portfolio badge -->
+          <div class="port-active-badge" id="port-badge">
+            <div class="pname" id="badge-name"></div>
+            <div class="pid"  id="badge-id"></div>
+            <div class="pactions">
+              <button class="btn btn-red btn-sm" onclick="deletePortfolio()">Delete</button>
+              <button class="btn btn-yellow btn-sm" onclick="showSwitchForm()">Change Portfolio</button>
+            </div>
+          </div>
+
+          <!-- Switch-portfolio form (shown after clicking Change Portfolio) -->
+          <div class="port-switch-section" id="port-switch-section">
+            <div class="sw-label">Load existing portfolio by ID:</div>
+            <div class="controls">
+              <input id="switch-id" placeholder="paste portfolio UUID" style="width:210px"
+                onkeydown="if(event.key==='Enter')loadPortfolio()" />
+              <button class="btn btn-blue btn-sm" onclick="loadPortfolio()">Load</button>
+              <button class="btn btn-sm" onclick="hideSwitchForm()">Cancel</button>
+            </div>
+            <hr class="sep" />
+            <div class="sw-label">Or create a new portfolio:</div>
+          </div>
+
+          <!-- Create portfolio (hidden when one is active, shown in switch form too) -->
+          <div id="port-create-section">
+            <div class="controls">
+              <label>Name</label>
+              <input id="port-name" placeholder="My Portfolio" style="width:130px"
+                onkeydown="if(event.key==='Enter')createPortfolio()" />
+              <button class="btn" onclick="createPortfolio()">Create</button>
+            </div>
+            <div class="hint" id="port-hint">Create a portfolio or load an existing one by UUID.</div>
+          </div>
+
+          <hr class="sep" />
+
+          <!-- Add position -->
+          <div class="controls">
+            <label>Sym</label>
+            <input id="pos-sym" class="uppercase" placeholder="AAPL" maxlength="10" style="width:48px" />
+            <label>Qty</label>
+            <input id="pos-qty" type="number" placeholder="10" min="0.01" style="width:44px" />
+            <label>$</label>
+            <input id="pos-price" type="number" placeholder="178" min="0.01" style="width:58px" />
+            <select id="pos-provider" style="width:80px">
+              <option value="finnhub">finnhub</option>
+              <option value="alpha_vantage">alpha_vantage</option>
+            </select>
+            <button class="btn btn-blue" onclick="addPosition()">Add</button>
+          </div>
+          <div class="hint" id="pos-hint">Create a portfolio above first.</div>
+
+          <hr class="sep" />
+
+          <!-- Snapshot summary -->
+          <div class="port-summary" id="port-summary" style="display:none"></div>
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th><th>Qty</th><th>Cost</th><th>Price</th>
+                <th>Value</th><th>P&amp;L</th><th>P&amp;L%</th><th>Wt%</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="positions-body">
+              <tr><td colspan="9" class="muted">No positions.</td></tr>
+            </tbody>
+          </table>
+
+        </div>
+      </div>
+
+      <!-- Active Alerts -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9888; Active Alerts</span>
+          <span class="panel-status" id="alert-status">polling every 10s</span>
+        </div>
+        <div class="panel-body">
+          <div class="notice" style="margin-bottom:5px">
+            Alerts fire when z-score &ge;3&sigma; or MA diverges &ge;0.5% during polling.
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th><th>Type</th><th>Sev</th>
+                <th>Price</th><th>Z-Score</th><th>Time</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="alerts-body">
+              <tr><td colspan="7" class="muted">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ════ ROW 3 — Technical Indicators | Portfolio Risk ════ -->
+    <div class="row row-2">
+
+      <!-- Technical Indicators -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9650; Technical Indicators</span>
+          <span class="panel-status" id="indicator-status">enter symbol and run</span>
+        </div>
+        <div class="panel-body">
+          <div class="controls">
+            <label>Sym</label>
+            <input id="ind-sym" class="uppercase" placeholder="AAPL" maxlength="10" style="width:55px"
+              onkeydown="if(event.key==='Enter')fetchIndicators()" />
+            <select id="ind-provider">
+              <option value="finnhub">finnhub</option>
+              <option value="alpha_vantage">alpha_vantage</option>
+            </select>
+            <button class="btn btn-blue" onclick="fetchIndicators()">Run</button>
+            <span class="notice">needs 35+ price points for MACD</span>
+          </div>
+          <div class="metric-grid" id="indicator-grid"></div>
+          <div style="margin-top:4px">
+            <div id="indicator-signal"></div>
+            <div id="indicator-reasons" style="margin-top:3px;font-size:10px;color:var(--muted)"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Portfolio Risk -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9670; Portfolio Risk</span>
+          <span class="panel-status" id="risk-status">load a portfolio first</span>
+        </div>
+        <div class="panel-body">
+          <div class="controls">
+            <button class="btn btn-yellow" onclick="fetchRisk()">Run Risk Analysis</button>
+            <button class="btn btn-blue btn-sm" onclick="checkDataPoints()">Check Data Points</button>
+          </div>
+          <div id="data-points-summary" style="margin-top:4px;font-size:10px"></div>
+          <div class="metric-grid" id="risk-grid" style="margin-top:5px"></div>
+          <div id="risk-warning" style="margin-top:4px;font-size:10px;color:var(--yellow)"></div>
+          <div id="risk-correlation" style="margin-top:5px"></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ════ ROW 4 — Claude Insights ════ -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">&#9670; Claude Insights</span>
+        <span class="panel-status">GET /insights/{symbol} &middot; cached 5 min</span>
+      </div>
+      <div class="panel-body" style="display:flex;flex-direction:column;">
+        <div class="controls" style="margin-bottom:0">
+          <label>Sym</label>
+          <input id="insight-sym" class="uppercase" placeholder="AAPL" maxlength="10" style="width:55px"
+            onkeydown="if(event.key==='Enter')fetchInsight()" />
+          <button class="btn btn-blue" onclick="fetchInsight()">Fetch Insight</button>
+          <button class="btn btn-red" onclick="clearInsight()">Clear</button>
+        </div>
+        <div class="insights-output" id="insights-output" style="flex:1;height:auto">
+          <span class="muted">Enter a symbol and press Fetch Insight.</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /dashboard -->
+</div><!-- /terminal-window -->
+
+<script>
+// ── Clock ──────────────────────────────────────────────────────
+setInterval(() => {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
+}, 1000);
+
+// ── State ──────────────────────────────────────────────────────
+let portfolioId       = localStorage.getItem('portfolioId')   || null;
+let portfolioName     = localStorage.getItem('portfolioName') || null;
+let portfolioInterval = null;
+let lastSnapshot      = null;    // cached for checkDataPoints
+const sockets         = {};
+const activeJobs      = [];      // { symbol, provider, interval, jobId }
+
+if (portfolioId) activatePortfolio(portfolioId, portfolioName, false);
+
+// ══════════════════════════════════════════════════════════════
+// HEALTH
+// ══════════════════════════════════════════════════════════════
+async function checkHealth() {
+  try {
+    const res  = await fetch('/health');
+    const data = await res.json();
+    const ok   = data.status === 'ok';
+    document.getElementById('health-dot').className    = `health-dot ${ok ? 'ok' : 'err'}`;
+    document.getElementById('health-label').textContent = ok ? 'healthy' : 'degraded';
+  } catch {
+    document.getElementById('health-dot').className    = 'health-dot err';
+    document.getElementById('health-label').textContent = 'unreachable';
+  }
+}
+checkHealth();
+setInterval(checkHealth, 30000);
+
+// ══════════════════════════════════════════════════════════════
+// POLLING JOBS — POST /prices/poll  |  DELETE /prices/poll/{id}
+// ══════════════════════════════════════════════════════════════
+async function startPolling() {
+  const sym      = document.getElementById('poll-sym').value.trim().toUpperCase();
+  const provider = document.getElementById('poll-provider').value;
+  const interval = parseInt(document.getElementById('poll-interval').value) || 30;
+  if (!sym) return;
+  document.getElementById('poll-status').textContent = 'starting…';
+  try {
+    const res = await fetch('/prices/poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols: [sym], interval, provider }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    // job_id is a comma-separated string; one symbol = one id
+    const jobId = data.job_id.split(',')[0].trim();
+    activeJobs.push({ symbol: sym, provider, interval, jobId });
+    renderJobs();
+    document.getElementById('poll-sym').value = '';
+    document.getElementById('poll-status').textContent = `${activeJobs.length} running`;
+  } catch (err) {
+    document.getElementById('poll-status').textContent = `error: ${err.message}`;
+  }
+}
+
+async function removeJob(jobId) {
+  try {
+    await fetch(`/prices/poll/${jobId}`, { method: 'DELETE' });
+  } catch { /* ignore — job may have already expired */ }
+  const idx = activeJobs.findIndex(j => j.jobId === jobId);
+  if (idx !== -1) activeJobs.splice(idx, 1);
+  renderJobs();
+  document.getElementById('poll-status').textContent =
+    activeJobs.length ? `${activeJobs.length} running` : 'no jobs';
+}
+
+function renderJobs() {
+  const el = document.getElementById('job-list');
+  el.innerHTML = activeJobs.length
+    ? activeJobs.map(j => `
+        <span class="job-tag">
+          ${j.symbol}/${j.provider}/${j.interval}s
+          <button class="job-tag-remove" onclick="removeJob('${j.jobId}')" title="Stop job">&times;</button>
+        </span>`).join('')
+    : '<span class="muted" style="font-size:10px">No jobs yet. Start one above.</span>';
+}
+
+// ══════════════════════════════════════════════════════════════
+// PRICE LOOKUP — GET /prices/latest
+// ══════════════════════════════════════════════════════════════
+async function lookupPrice() {
+  const sym      = document.getElementById('lookup-sym').value.trim().toUpperCase();
+  const provider = document.getElementById('lookup-provider').value;
+  if (!sym) return;
+  document.getElementById('lookup-price').textContent = '…';
+  document.getElementById('price-result').style.display = 'block';
+  try {
+    const res = await fetch(`/prices/latest?symbol=${sym}&provider=${provider}`);
+    if (!res.ok) throw new Error(res.statusText);
+    const d = await res.json();
+    document.getElementById('lookup-price').textContent = `$${fmt(d.price)}`;
+    document.getElementById('lookup-meta').textContent =
+      `${d.provider} · ${new Date(d.timestamp).toLocaleTimeString('en-US',{hour12:false})}`;
+  } catch (err) {
+    document.getElementById('lookup-price').textContent = `error: ${err.message}`;
+    document.getElementById('lookup-meta').textContent = '';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// LIVE TICKERS — WS /ws/prices/{symbol}
+// ══════════════════════════════════════════════════════════════
+function addTicker() {
+  const sym = document.getElementById('sym-input').value.trim().toUpperCase();
+  if (!sym || sockets[sym]) return;
+
+  const tickersEl = document.getElementById('tickers');
+  const placeholder = tickersEl.querySelector('.muted');
+  if (placeholder) placeholder.remove();
+
+  const card = document.createElement('div');
+  card.className = 'ticker-card';
+  card.id = `card-${sym}`;
+  card.innerHTML = `
+    <button class="ticker-remove" onclick="removeTicker('${sym}')">&times;</button>
+    <div class="ticker-symbol">${sym}</div>
+    <div class="ticker-price" id="price-${sym}">—</div>
+    <div class="ticker-meta"  id="meta-${sym}">connecting…</div>
+  `;
+  tickersEl.appendChild(card);
+
+  const ws = new WebSocket(`ws://${location.host}/ws/prices/${sym}`);
+  sockets[sym] = ws;
+
+  ws.onopen    = () => { card.classList.add('live'); document.getElementById(`meta-${sym}`).textContent = 'waiting for tick…'; updateWsStatus(); };
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    document.getElementById(`price-${sym}`).textContent = `$${fmt(d.price)}`;
+    document.getElementById(`meta-${sym}`).textContent  = `${d.provider||''} · ${new Date(d.timestamp).toLocaleTimeString('en-US',{hour12:false})}`;
+  };
+  ws.onerror = () => { card.classList.remove('live'); document.getElementById(`meta-${sym}`).textContent = 'error'; };
+  ws.onclose = () => { card.classList.remove('live'); document.getElementById(`meta-${sym}`).textContent = 'disconnected'; delete sockets[sym]; updateWsStatus(); };
+
+  document.getElementById('sym-input').value = '';
+}
+
+function removeTicker(sym) {
+  if (sockets[sym]) { sockets[sym].close(); delete sockets[sym]; }
+  const c = document.getElementById(`card-${sym}`);
+  if (c) c.remove();
+  if (!document.querySelector('.ticker-card')) {
+    document.getElementById('tickers').innerHTML = '<span class="muted" style="font-size:10px">No subscriptions yet.</span>';
+  }
+  updateWsStatus();
+}
+
+function updateWsStatus() {
+  const n = Object.keys(sockets).length;
+  document.getElementById('ws-status').textContent = n ? `${n} subscribed` : 'disconnected';
+}
+
+// ══════════════════════════════════════════════════════════════
+// PORTFOLIO — create / load / clear / delete
+// ══════════════════════════════════════════════════════════════
+async function createPortfolio() {
+  const name = document.getElementById('port-name').value.trim();
+  if (!name) return;
+  document.getElementById('port-hint').textContent = 'Creating…';
+  try {
+    const res  = await fetch('/portfolios', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    document.getElementById('port-name').value = '';
+    activatePortfolio(data.id, data.name, true);
+  } catch (err) {
+    document.getElementById('port-hint').textContent = `error: ${err.message}`;
+  }
+}
+
+async function loadPortfolio() {
+  const id = document.getElementById('switch-id').value.trim();
+  if (!id) return;
+  document.getElementById('switch-id').value = '';
+  try {
+    // Verify portfolio exists by fetching its snapshot
+    const res = await fetch(`/portfolios/${id}/snapshot`);
+    if (!res.ok) throw new Error(`Portfolio not found (${res.status})`);
+    const snap = await res.json();
+    hideSwitchForm();
+    activatePortfolio(id, snap.portfolio_name, true);
+  } catch (err) {
+    document.getElementById('port-hint').textContent = `load error: ${err.message}`;
+  }
+}
+
+function activatePortfolio(id, name, persist) {
+  portfolioId   = id;
+  portfolioName = name;
+  if (persist) {
+    localStorage.setItem('portfolioId',   id);
+    localStorage.setItem('portfolioName', name);
+  }
+
+  document.getElementById('port-badge').style.display          = 'block';
+  document.getElementById('badge-name').textContent            = name;
+  document.getElementById('badge-id').textContent              = `ID: ${id}`;
+  document.getElementById('port-create-section').style.display = 'none';
+  document.getElementById('port-switch-section').style.display = 'none';
+
+  document.getElementById('port-status').textContent = name;
+  document.getElementById('pos-hint').textContent    = `Adding to: ${name}`;
+  document.getElementById('risk-status').textContent = 'ready';
+
+  startSnapshotPolling();
+}
+
+function showSwitchForm() {
+  document.getElementById('port-switch-section').style.display = 'block';
+  document.getElementById('port-create-section').style.display = 'block';
+  document.getElementById('port-badge').style.display          = 'none';
+  // pause snapshot polling while switching
+  if (portfolioInterval) { clearInterval(portfolioInterval); portfolioInterval = null; }
+}
+
+function hideSwitchForm() {
+  document.getElementById('port-switch-section').style.display = 'none';
+  document.getElementById('port-create-section').style.display = 'none';
+  document.getElementById('port-badge').style.display          = 'block';
+  startSnapshotPolling();
+}
+
+function clearPortfolio() {
+  if (portfolioInterval) { clearInterval(portfolioInterval); portfolioInterval = null; }
+  portfolioId   = null;
+  portfolioName = null;
+  lastSnapshot  = null;
+  localStorage.removeItem('portfolioId');
+  localStorage.removeItem('portfolioName');
+
+  document.getElementById('port-badge').style.display          = 'none';
+  document.getElementById('port-switch-section').style.display = 'none';
+  document.getElementById('port-create-section').style.display = 'block';
+  document.getElementById('port-summary').style.display        = 'none';
+  document.getElementById('port-status').textContent           = 'no portfolio loaded';
+  document.getElementById('pos-hint').textContent              = 'Create a portfolio above first.';
+  document.getElementById('port-hint').textContent             = 'Create a portfolio or load an existing one by UUID.';
+  document.getElementById('risk-status').textContent           = 'load a portfolio first';
+  document.getElementById('positions-body').innerHTML          = '<tr><td colspan="9" class="muted">No positions.</td></tr>';
+  document.getElementById('port-summary').innerHTML            = '';
+  document.getElementById('risk-grid').innerHTML               = '';
+  document.getElementById('risk-warning').textContent          = '';
+  document.getElementById('risk-correlation').innerHTML        = '';
+  document.getElementById('data-points-summary').innerHTML     = '';
+}
+
+async function deletePortfolio() {
+  if (!portfolioId) return;
+  if (!confirm(`Delete portfolio "${portfolioName}" and remove all positions?`)) return;
+  try {
+    const res = await fetch(`/portfolios/${portfolioId}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 204) throw new Error(res.statusText);
+    clearPortfolio();
+  } catch (err) {
+    document.getElementById('port-status').textContent = `delete error: ${err.message}`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// POSITION — add / close
+// ══════════════════════════════════════════════════════════════
+async function addPosition() {
+  if (!portfolioId) { document.getElementById('pos-hint').textContent = 'Create a portfolio first.'; return; }
+  const sym      = document.getElementById('pos-sym').value.trim().toUpperCase();
+  const qty      = parseFloat(document.getElementById('pos-qty').value);
+  const price    = parseFloat(document.getElementById('pos-price').value);
+  const provider = document.getElementById('pos-provider').value;
+  if (!sym || !qty || !price) { document.getElementById('pos-hint').textContent = 'Fill symbol, qty and price.'; return; }
+
+  document.getElementById('pos-hint').textContent = 'Adding…';
+  try {
+    const res = await fetch(`/portfolios/${portfolioId}/positions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: sym, quantity: qty, price, provider }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    document.getElementById('pos-sym').value = document.getElementById('pos-qty').value = document.getElementById('pos-price').value = '';
+    document.getElementById('pos-hint').textContent = `${sym} added.`;
+    fetchSnapshot();
+  } catch (err) {
+    document.getElementById('pos-hint').textContent = `error: ${err.message}`;
+  }
+}
+
+async function closePosition(positionId, sym) {
+  if (!confirm(`Close ${sym} position?`)) return;
+  try {
+    const res = await fetch(`/portfolios/${portfolioId}/positions/${positionId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(res.statusText);
+    document.getElementById('pos-hint').textContent = `${sym} closed.`;
+    fetchSnapshot();
+  } catch (err) {
+    document.getElementById('pos-hint').textContent = `error: ${err.message}`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// SNAPSHOT — GET /portfolios/{id}/snapshot
+// ══════════════════════════════════════════════════════════════
+function startSnapshotPolling() {
+  fetchSnapshot();
+  if (portfolioInterval) clearInterval(portfolioInterval);
+  portfolioInterval = setInterval(fetchSnapshot, 10000);
+}
+
+async function fetchSnapshot() {
+  if (!portfolioId) return;
+  try {
+    const res  = await fetch(`/portfolios/${portfolioId}/snapshot`);
+    if (!res.ok) throw new Error(res.statusText);
+    lastSnapshot = await res.json();
+    renderSnapshot(lastSnapshot);
+  } catch (err) {
+    document.getElementById('port-status').textContent = `snapshot error: ${err.message}`;
+  }
+}
+
+function renderSnapshot(snap) {
+  document.getElementById('port-status').textContent = `${snap.portfolio_name} · ${ts()}`;
+
+  const pc = snap.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+  const sg = snap.total_pnl >= 0 ? '+' : '';
+  const s  = document.getElementById('port-summary');
+  s.style.display = 'flex';
+  s.innerHTML = `
+    <div class="kv"><span class="k">Portfolio</span><span class="v" style="color:var(--blue)">${snap.portfolio_name}</span></div>
+    <div class="kv"><span class="k">Total Value</span><span class="v">$${fmt(snap.total_value)}</span></div>
+    <div class="kv"><span class="k">Unrealized P&amp;L</span><span class="v ${pc}">${sg}$${fmt(snap.total_pnl)}</span></div>
+  `;
+
+  document.getElementById('positions-body').innerHTML = snap.positions.length
+    ? snap.positions.map(p => {
+        const pc2 = p.unrealized_pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+        const sg2 = p.unrealized_pnl >= 0 ? '+' : '';
+        return `<tr>
+          <td style="color:var(--blue)">${p.symbol}</td>
+          <td>${p.quantity}</td>
+          <td>$${fmt(p.avg_cost_basis)}</td>
+          <td>$${fmt(p.current_price)}</td>
+          <td>$${fmt(p.market_value)}</td>
+          <td class="${pc2}">${sg2}$${fmt(p.unrealized_pnl)}</td>
+          <td class="${pc2}">${sg2}${(p.pnl_pct * 100).toFixed(2)}%</td>
+          <td class="muted">${(p.weight * 100).toFixed(1)}%</td>
+          <td><button class="btn btn-red btn-sm" onclick="closePosition('${p.position_id}','${p.symbol}')">Close</button></td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="9" class="muted">No open positions.</td></tr>';
+}
+
+// ══════════════════════════════════════════════════════════════
+// ALERTS — GET /alerts/active + POST /alerts/{id}/resolve
+// ══════════════════════════════════════════════════════════════
+async function fetchAlerts() {
+  try {
+    const res  = await fetch('/alerts/active');
+    const data = await res.json();
+    renderAlerts(data);
+  } catch {
+    document.getElementById('alert-status').textContent = 'fetch error';
+  }
+}
+
+function renderAlerts(alerts) {
+  document.getElementById('alert-status').textContent = `${alerts.length} active · ${ts()}`;
+  document.getElementById('alerts-body').innerHTML = alerts.length
+    ? alerts.map(a => `<tr>
+        <td style="color:var(--blue)">${a.symbol}</td>
+        <td>${a.anomaly_type}</td>
+        <td class="sev-${a.severity}">${a.severity.toUpperCase()}</td>
+        <td>$${fmt(a.price)}</td>
+        <td>${a.z_score != null ? Number(a.z_score).toFixed(2) : '—'}</td>
+        <td class="muted">${new Date(a.timestamp).toLocaleTimeString('en-US',{hour12:false})}</td>
+        <td><button class="btn btn-yellow btn-sm" onclick="resolveAlert('${a.id}')">Resolve</button></td>
+      </tr>`).join('')
+    : '<tr><td colspan="7" class="muted">No active alerts.</td></tr>';
+}
+
+async function resolveAlert(id) {
+  try {
+    const res = await fetch(`/alerts/${id}/resolve`, { method: 'POST' });
+    if (!res.ok) throw new Error(res.statusText);
+    fetchAlerts();
+  } catch (err) {
+    document.getElementById('alert-status').textContent = `error: ${err.message}`;
+  }
+}
+
+fetchAlerts();
+setInterval(fetchAlerts, 10000);
+
+// ══════════════════════════════════════════════════════════════
+// INDICATORS — GET /analytics/{symbol}/indicators
+// ══════════════════════════════════════════════════════════════
+async function fetchIndicators() {
+  const sym      = document.getElementById('ind-sym').value.trim().toUpperCase();
+  const provider = document.getElementById('ind-provider').value;
+  if (!sym) return;
+  document.getElementById('indicator-status').textContent = 'loading…';
+  document.getElementById('indicator-grid').innerHTML     = '';
+  document.getElementById('indicator-signal').innerHTML   = '';
+  document.getElementById('indicator-reasons').textContent = '';
+  try {
+    const res = await fetch(`/analytics/${sym}/indicators?provider=${provider}`);
+    if (!res.ok) throw new Error(await res.text());
+    const d = await res.json();
+
+    const rsiClass  = d.rsi == null ? '' : d.rsi < 30 ? 'up' : d.rsi > 70 ? 'down' : '';
+    const histClass = d.macd ? (d.macd.histogram >= 0 ? 'up' : 'down') : '';
+    const ptColor   = d.price_count >= 35 ? 'var(--green)' : d.price_count >= 20 ? 'var(--yellow)' : 'var(--red)';
+
+    document.getElementById('indicator-status').textContent = `${sym} · ${ts()}`;
+    document.getElementById('indicator-grid').innerHTML = `
+      <div class="metric-card"><div class="mk">Price Points</div><div class="mv" style="color:${ptColor}">${d.price_count}</div></div>
+      <div class="metric-card"><div class="mk">RSI (14)</div><div class="mv ${rsiClass}">${d.rsi != null ? d.rsi.toFixed(2) : '—'}</div></div>
+      <div class="metric-card"><div class="mk">MACD Line</div><div class="mv">${d.macd ? d.macd.line.toFixed(4) : '—'}</div></div>
+      <div class="metric-card"><div class="mk">MACD Hist</div><div class="mv ${histClass}">${d.macd ? d.macd.histogram.toFixed(4) : '—'}</div></div>
+      <div class="metric-card"><div class="mk">BB Upper</div><div class="mv">$${d.bollinger ? fmt(d.bollinger.upper) : '—'}</div></div>
+      <div class="metric-card"><div class="mk">BB Lower</div><div class="mv">$${d.bollinger ? fmt(d.bollinger.lower) : '—'}</div></div>
+    `;
+    const sc = d.signal.toLowerCase();
+    document.getElementById('indicator-signal').innerHTML =
+      `<span class="signal-badge ${sc}">${d.signal}</span>
+       <span class="muted" style="font-size:10px;margin-left:6px">${(d.confidence*100).toFixed(0)}% confidence</span>`;
+    if (d.reasons.length)
+      document.getElementById('indicator-reasons').textContent = d.reasons.join(' · ');
+  } catch (err) {
+    document.getElementById('indicator-status').textContent = `error: ${err.message}`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// RISK — GET /analytics/portfolios/{id}/risk
+// ══════════════════════════════════════════════════════════════
+async function fetchRisk() {
+  if (!portfolioId) { document.getElementById('risk-status').textContent = 'load a portfolio first'; return; }
+  document.getElementById('risk-status').textContent = 'loading…';
+  document.getElementById('risk-grid').innerHTML     = '';
+  document.getElementById('risk-warning').textContent = '';
+  document.getElementById('risk-correlation').innerHTML = '';
+  try {
+    const res = await fetch(`/analytics/portfolios/${portfolioId}/risk`);
+    if (!res.ok) throw new Error(await res.text());
+    const d = await res.json();
+    document.getElementById('risk-status').textContent = ts();
+
+    const sharpeClass = d.sharpe_ratio == null ? '' : d.sharpe_ratio >= 1 ? 'up' : d.sharpe_ratio < 0 ? 'down' : 'warn';
+    const ddClass     = d.max_drawdown == null ? '' : d.max_drawdown < -0.2 ? 'down' : d.max_drawdown < -0.1 ? 'warn' : 'up';
+
+    document.getElementById('risk-grid').innerHTML = `
+      <div class="metric-card"><div class="mk">VaR 1-day 95%</div><div class="mv down">${d.var_1day_95 != null ? '-$'+fmt(d.var_1day_95) : '—'}</div></div>
+      <div class="metric-card"><div class="mk">Sharpe Ratio</div><div class="mv ${sharpeClass}">${d.sharpe_ratio != null ? d.sharpe_ratio.toFixed(3) : '—'}</div></div>
+      <div class="metric-card"><div class="mk">Max Drawdown</div><div class="mv ${ddClass}">${d.max_drawdown != null ? (d.max_drawdown*100).toFixed(2)+'%' : '—'}</div></div>
+      <div class="metric-card"><div class="mk">Total Value</div><div class="mv">$${fmt(d.total_value)}</div></div>
+    `;
+    if (d.warning) document.getElementById('risk-warning').textContent = `! ${d.warning}`;
+
+    if (d.correlation_matrix && Object.keys(d.correlation_matrix).length > 1) {
+      const syms = Object.keys(d.correlation_matrix);
+      let html = `<div class="muted" style="font-size:9px;margin-bottom:3px">CORRELATION MATRIX</div>`;
+      html += `<table style="font-size:10px"><thead><tr><th></th>${syms.map(s=>`<th>${s}</th>`).join('')}</tr></thead><tbody>`;
+      syms.forEach(r => {
+        html += `<tr><td style="color:var(--muted)">${r}</td>`;
+        syms.forEach(c => {
+          const v = d.correlation_matrix[r]?.[c];
+          const color = v == null ? 'var(--muted)' : v > 0.7 ? 'var(--red)' : v < -0.3 ? 'var(--green)' : 'var(--text)';
+          html += `<td style="color:${color}">${v != null ? Number(v).toFixed(2) : '—'}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('risk-correlation').innerHTML = html;
+    }
+  } catch (err) {
+    document.getElementById('risk-status').textContent = `error: ${err.message}`;
+  }
+}
+
+// Check how many price points exist per symbol in current portfolio
+async function checkDataPoints() {
+  if (!lastSnapshot || !lastSnapshot.positions.length) {
+    document.getElementById('data-points-summary').innerHTML =
+      '<span class="muted">No positions — add positions to the portfolio first.</span>';
+    return;
+  }
+  const el = document.getElementById('data-points-summary');
+  el.innerHTML = '<span class="loading">checking…</span>';
+
+  const results = await Promise.all(
+    lastSnapshot.positions.map(async p => {
+      try {
+        const res = await fetch(`/analytics/${p.symbol}/indicators?provider=${p.provider}`);
+        if (!res.ok) return { symbol: p.symbol, count: 0 };
+        const d = await res.json();
+        return { symbol: p.symbol, count: d.price_count };
+      } catch { return { symbol: p.symbol, count: 0 }; }
+    })
+  );
+
+  el.innerHTML = results.map(r => {
+    const color  = r.count >= 35 ? 'var(--green)' : r.count >= 20 ? 'var(--yellow)' : 'var(--red)';
+    const suffix = r.count >= 35 ? '&#10003; ready' : r.count >= 20 ? 'partial (need 35)' : `need ${35 - r.count} more`;
+    return `<span style="margin-right:12px;color:${color}">${r.symbol}: ${r.count} pts — ${suffix}</span>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════════
+// CLAUDE INSIGHTS — GET /insights/{symbol}
+// ══════════════════════════════════════════════════════════════
+async function fetchInsight() {
+  const sym = document.getElementById('insight-sym').value.trim().toUpperCase();
+  if (!sym) return;
+  const out = document.getElementById('insights-output');
+  out.innerHTML = `<span class="loading">&#9679; Fetching insight for ${sym}…</span>`;
+  try {
+    const res  = await fetch(`/insights/${sym}`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    out.innerHTML =
+      `<span class="ok">[${sym}]</span> <span class="muted">${ts()}</span>\n\n` +
+      esc(data.insight || data.summary || JSON.stringify(data, null, 2));
+  } catch (err) {
+    out.innerHTML = `<span class="err">Error: ${esc(err.message)}</span>`;
+  }
+}
+
+function clearInsight() {
+  document.getElementById('insights-output').innerHTML =
+    '<span class="muted">Enter a symbol and press Fetch Insight.</span>';
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+function ts()   { return new Date().toLocaleTimeString('en-US', { hour12: false }); }
+function fmt(n) { return Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+</script>
+</body>
+</html>

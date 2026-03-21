@@ -1,6 +1,7 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_async_db
@@ -35,4 +36,13 @@ async def polling_jobs(data: PollingRequest, db: AsyncSession = Depends(get_asyn
             "interval": data.interval,
         },
     }
-        
+
+
+@router.delete("/poll/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_polling_job(job_id: UUID, db: AsyncSession = Depends(get_async_db)) -> None:
+    result = await db.execute(select(PollingJob).where(PollingJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Polling job not found")
+    await db.delete(job)
+    await db.commit()

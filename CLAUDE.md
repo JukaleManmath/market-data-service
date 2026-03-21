@@ -14,9 +14,9 @@ Full 9-phase build plan is in [README.md](README.md).
 
 ---
 
-## Current State — Phase 5 Complete
+## Current State — Phase 7 Complete
 
-Portfolio management layer live. Portfolios, positions, live P&L snapshot. Ready for Phase 6.
+WebSocket streaming live. Terminal dashboard at `http://localhost:8000/ui` covers all API routes. Ready for Phase 8.
 
 | Phase | What | Status |
 |-------|------|--------|
@@ -25,8 +25,8 @@ Portfolio management layer live. Portfolios, positions, live P&L snapshot. Ready
 | 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | **Done** |
 | 4 | JSON logging, RequestID middleware, /health endpoint | **Done** |
 | 5 | Portfolio model, live P&L snapshot, position management | **Done** |
-| 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | Not started |
-| 7 | WebSocket streaming via aiokafka broadcaster + minimal terminal UI (`app/static/index.html`) | Not started |
+| 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | **Done** |
+| 7 | WebSocket streaming via aiokafka broadcaster + terminal dashboard (`app/static/index.html`) | **Done** |
 | 8 | Claude portfolio intelligence + natural language Q&A | Not started |
 | 9 | Rate limiting, API key auth, Prometheus + Grafana, webhooks | Not started |
 
@@ -36,18 +36,22 @@ Portfolio management layer live. Portfolios, positions, live P&L snapshot. Ready
 
 ```
 app/
-  main.py                              # FastAPI app + lifespan starts polling_worker
+  main.py                              # FastAPI app + lifespan: polling_worker + kafka_broadcaster
   api/
     prices.py                          # GET /prices/latest?symbol=&provider=
-    poll.py                            # POST /prices/poll
-    alerts.py                          # GET /alerts/active, POST /alerts/{id}/resolve
+    poll.py                            # POST /prices/poll, DELETE /prices/poll/{job_id}
+    alerts.py                          # GET /alerts/active (symbol/provider optional), POST /alerts/{id}/resolve
     insights.py                        # GET /insights/{symbol} — Claude summary
     health.py                          # GET /health — Postgres SELECT 1 + Redis PING
-    portfolios.py                      # POST /portfolios, POST/DELETE /portfolios/{id}/positions, GET /portfolios/{id}/snapshot
+    portfolios.py                      # POST /portfolios, DELETE /portfolios/{id}, POST/DELETE /portfolios/{id}/positions, GET /portfolios/{id}/snapshot
+    analytics.py                       # GET /analytics/{symbol}/indicators, GET /analytics/portfolios/{id}/risk
+    stream.py                          # WS /ws/prices/{symbol} — WebSocket price stream
   core/
     config.py                          # Settings via pydantic-settings (reads .env)
     redis.py                           # Async redis_client (redis.asyncio.Redis)
     logging.py                         # JSONFormatter + setup_logging() — structured JSON logs
+    websocket_manager.py               # ConnectionManager — symbol → [WebSocket] pub/sub registry
+    kafka_broadcaster.py               # start_broadcaster() — aiokafka consumer → manager.broadcast()
   middleware/
     request_id.py                      # UUID per request, propagated as X-Request-ID header
   database/
@@ -69,21 +73,25 @@ app/
     price.py                           # PriceResponse
     poll.py                            # PollingRequest / PollingResponse
     alerts.py                          # AlertResponse
-    portfolio.py                       # CreatePortfolioRequest, PortfolioResponse, AddPositionRequest, PositionResponse, PortfolioSnapshot
+    portfolio.py                       # CreatePortfolioRequest, PortfolioResponse, AddPositionRequest, PositionResponse, PortfolioSnapshot (includes position_id)
+    analytics.py                       # IndicatorResponse, RiskResponse, MACDSchema, BollingerSchema
   services/
     price_service.py                   # PriceService — 3-tier fetch orchestrator (injected deps)
     polling_worker_service.py          # polling_worker() — background task, builds PriceService per job
     moving_average_service.py          # MovingAverageService — MA calc + dedup persistence
     anomaly_detector.py                # AnomalyDetector — z-score (N=20, 3σ/4σ) + MA divergence (0.5%)
     ai_insights.py                     # AIInsightsService — AsyncAnthropic claude-sonnet-4-6, Redis 5 min cache
-    portfolio_service.py               # PortfolioService — create_portfolio, add_or_update_position, close_position, get_snapshot
+    portfolio_service.py               # PortfolioService — create/delete portfolio, add_or_update/close position, get_snapshot
+    technical_analysis.py              # TechnicalAnalysisService — RSI (14), MACD (12/26/9 EMA), Bollinger Bands (20, 2σ)
+    signal_generator.py                # SignalGenerator — voting on RSI/MACD/Bollinger → BUY/SELL/HOLD + confidence
+    risk_engine.py                     # RiskEngine — parametric VaR (95%), Sharpe, max drawdown, correlation matrix
     providers/
       base.py                          # BaseProvider ABC + PriceFetchResult dataclass
       finnhub.py                       # FinnhubProvider(BaseProvider)
       alpha_vantage.py                 # AlphaVantageProvider(BaseProvider)
       registry.py                      # get_provider(name) → BaseProvider instance
 static/
-  index.html                           # Phase 7 — single-file terminal dashboard (vanilla JS, no build step)
+  index.html                           # Phase 7 — single-file terminal dashboard (vanilla JS, no build step). Served at /ui
 scripts/
   run_ma_consumer.py                   # Entry point for ma-consumer container
   run_anomaly_consumer.py              # Entry point for anomaly-consumer container
@@ -96,7 +104,7 @@ alembic-migrations/
   script.py.mako                       # Template for generating new migration files
   versions/                            # Migration history — applied in order on startup
 requirements/
-  requirements.txt                     # Sync-only stack (no asyncpg yet)
+  requirements.txt                     # Full stack: fastapi, sqlalchemy[asyncio], asyncpg, redis, confluent_kafka, aiokafka, anthropic, numpy, scipy
 ```
 
 ---
@@ -125,6 +133,9 @@ PriceService.get_latest_price(symbol)
 - **Kafka producer** — `acks="all"`, `retries=5`. No per-message `flush()`. Flushed once on app shutdown via lifespan.
 - **PriceService is per-request** — db session is request-scoped, so PriceService is too.
 - **No auth, no rate limiting** — Phase 9.
+- **kafka_broadcaster uses aiokafka** — runs inside FastAPI's event loop as an asyncio task. MA and anomaly consumers still use confluent_kafka (sync, separate containers).
+- **ConnectionManager is a module-level singleton** — `manager = ConnectionManager()` in `websocket_manager.py`. Shared between `stream.py` (WebSocket endpoint) and `kafka_broadcaster.py`.
+- **delete_portfolio() deletes position rows** — uses `DELETE FROM positions WHERE portfolio_id = ?` before deleting the portfolio row. Marking inactive is not enough; the FK constraint requires hard delete.
 
 ---
 
@@ -160,6 +171,7 @@ MA Consumer (separate container, price-events topic):
 **Phase 2 done:** monthly `RANGE` partitioning on `price_points(timestamp)`. Partitions exist for 2026-03 through 2027-12 plus `price_points_future`.
 **Phase 3 done:** `alerts` table with `alertseverity` and `anomalytype` Postgres enums + `resolved` boolean. Migration uses raw `op.execute()` SQL throughout — `op.create_table()` with `create_type=False` was silently ignored by SQLAlchemy, causing `DuplicateObject` errors.
 **Phase 5 done:** `portfolios` and `positions` tables. Migration `e5f6a7b8c9d0_add_portfolio_tables.py` uses raw `op.execute()` SQL (same pattern as alerts).
+**Phase 7 done:** No new tables. `PositionSnapshot` schema gained `position_id: UUID` field (required for the Close button in the dashboard).
 
 ---
 
@@ -199,6 +211,7 @@ ALERT_WEBHOOK_URLS        # Comma-separated webhook URLs
 | `kafka-init` | — | One-shot topic creation |
 
 **Phase 3 done:** `anomaly_consumer` container added.
+**Phase 7 done:** No new containers — `kafka_broadcaster` runs as an asyncio task inside `marketdata-api`.
 **Phase 9 adds:** `prometheus` (9090) and `grafana` (3000).
 
 ---
@@ -214,10 +227,10 @@ Current `requirements/requirements.txt`:
 - `pydantic-settings` — config
 
 **Phase 3 added:** `anthropic`
+**Phase 6 added:** `numpy`, `scipy`
+**Phase 7 added:** `aiokafka`
 
 **To add per phase:**
-- Phase 6: `numpy`, `scipy`
-- Phase 7: `aiokafka`
 - Phase 9: `prometheus-client`
 
 ---
@@ -272,3 +285,6 @@ docker compose -f docker/docker-compose.yml down -v
 - **`--env-file .env` is required** — the compose file is in `docker/`, so Docker Compose won't find the root `.env` automatically. Always pass `--env-file .env` from the project root.
 - **Never use `op.create_table()` with Enum columns** — SQLAlchemy ignores `create_type=False` inside `op.create_table()` and emits a second `CREATE TYPE`, causing `DuplicateObject` errors. Always use `op.execute()` with raw SQL for the full CREATE TABLE when the table references custom Postgres enum types. See `c3f9a12b4e01_add_alerts_table.py`.
 - **`anomaly_consumer` service key vs container name** — the Docker Compose service key is `anomaly_consumer` (underscore); the container name is `anomaly-consumer` (hyphen). `docker compose logs` takes the service key.
+- **`pnl_pct` is a ratio, not a percentage** — `portfolio_service.get_snapshot()` returns `pnl_pct` as e.g. `0.389`. The dashboard multiplies by 100 for display. Do not add `* 100` back to the service.
+- **`DELETE /prices/poll/{job_id}` hard-deletes the row** — the polling worker picks up jobs by querying the DB; deleting the row stops it from ever running again.
+- **Dashboard portfolio UUID persists in localStorage** — `activatePortfolio(id, name, persist=true)` writes to `localStorage`. Page refresh restores the active portfolio automatically.

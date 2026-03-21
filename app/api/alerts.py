@@ -16,20 +16,21 @@ router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
 @router.get("/active", response_model=list[AlertResponse])
 async def get_active_alerts(
-    symbol: str,
-    provider: str = "finnhub",
+    symbol: str | None = None,
+    provider: str | None = None,
     limit: int = 50,
     db: AsyncSession = Depends(get_async_db),
 ) -> list[AlertResponse]:
     """
-    Return unresolved alerts for a symbol, newest first.
+    Return unresolved alerts, newest first.
+    Optionally filter by symbol and/or provider.
     """
-    result = await db.execute(
-        select(Alert)
-        .where(Alert.symbol == symbol, Alert.provider == provider, Alert.resolved == False)
-        .order_by(Alert.timestamp.desc())
-        .limit(limit)
-    )
+    q = select(Alert).where(Alert.resolved == False)
+    if symbol:
+        q = q.where(Alert.symbol == symbol)
+    if provider:
+        q = q.where(Alert.provider == provider)
+    result = await db.execute(q.order_by(Alert.timestamp.desc()).limit(limit))
     return result.scalars().all()
 
 

@@ -4,7 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.kafka.producer import send_portfolio_event
@@ -46,6 +46,23 @@ class PortfolioService:
     # ------------------------------------------------------------------
     # Position management
     # ------------------------------------------------------------------
+
+    async def delete_portfolio(self, portfolio_id: UUID) -> None:
+        """Close all active positions then delete the portfolio row."""
+        portfolio_result = await self.db.execute(
+            select(Portfolio).where(Portfolio.id == portfolio_id)
+        )
+        portfolio = portfolio_result.scalar_one_or_none()
+        if portfolio is None:
+            raise ValueError(f"Portfolio {portfolio_id} not found")
+
+        await self.db.execute(
+            delete(Position).where(Position.portfolio_id == portfolio_id)
+        )
+
+        await self.db.delete(portfolio)
+        await self.db.commit()
+        logger.info(f"[Portfolio] Deleted portfolio {portfolio_id}")
 
     async def add_or_update_position(
         self,
@@ -170,6 +187,7 @@ class PortfolioService:
             total_value += market_value
             position_snapshots.append(
                 PositionSnapshot(
+                    position_id=pos.id,
                     symbol=pos.symbol,
                     provider=pos.provider,
                     quantity=pos.quantity,
@@ -178,7 +196,7 @@ class PortfolioService:
                     market_value=market_value,
                     unrealized_pnl=market_value - (pos.quantity * pos.avg_cost_basis),
                     pnl_pct=(
-                        (current_price - pos.avg_cost_basis) / pos.avg_cost_basis * 100
+                        (current_price - pos.avg_cost_basis) / pos.avg_cost_basis
                         if pos.avg_cost_basis > 0
                         else 0.0
                     ),

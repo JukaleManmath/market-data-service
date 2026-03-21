@@ -50,6 +50,7 @@ class PositionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class PositionSnapshot(BaseModel):
+    position_id: UUID
     symbol: str
     provider: str
     quantity: float
