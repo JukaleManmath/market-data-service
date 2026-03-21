@@ -27,3 +27,4 @@ asyncpg
 alembic
 pydantic-settings
 redis
+anthropic

@@ -3,8 +3,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.prices import router as price_router
+from app.api.alerts import router as alerts_router
+from app.api.insights import router as insights_router
 from app.api.poll import router as poll_router
+from app.api.prices import router as price_router
 from app.kafka.producer import producer
 from app.services.polling_worker_service import polling_worker
 
@@ -24,3 +26,5 @@ app = FastAPI(lifespan=lifespan)
 
 app.include_router(price_router)
 app.include_router(poll_router)
+app.include_router(alerts_router)
+app.include_router(insights_router)

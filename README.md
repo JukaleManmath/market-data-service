@@ -211,7 +211,7 @@ docker exec postgres psql -U postgres -d marketdata -c "SELECT COUNT(*) FROM pri
 
 ---
 
-### Phase 3 — Anomaly Detection + Claude Symbol Insights
+### Phase 3 — Anomaly Detection + Claude Symbol Insights ✅
 
 **Goal:** Z-score and MA crossover anomaly detection → alerts table → Claude narrative per symbol.
 
@@ -231,6 +231,15 @@ New files:
 Use `anthropic.AsyncAnthropic` — never the sync client (it blocks the event loop).
 Add `anomaly_consumer` service to `docker-compose.yml`.
 Add `ANTHROPIC_API_KEY` to `app/core/config.py` and `.env.example`.
+
+**Migration gotcha:** `op.create_table()` with `create_type=False` on Enum columns silently emits a second `CREATE TYPE`, causing `DuplicateObject` errors. Use `op.execute()` with raw SQL for the full `CREATE TABLE` instead — same pattern as the partition migration.
+
+```bash
+# Verify
+curl "http://localhost:8000/alerts/active?symbol=AAPL"
+curl "http://localhost:8000/insights/AAPL"
+# → Claude summary cached in Redis, alert rows in DB
+```
 
 ---
 
@@ -313,9 +322,9 @@ curl "http://localhost:8000/portfolios/1/risk"
 
 ---
 
-### Phase 7 — Real-time WebSocket Streaming
+### Phase 7 — Real-time WebSocket Streaming + Terminal Dashboard
 
-**Goal:** Push price ticks to subscribers instantly via WebSocket instead of REST polling.
+**Goal:** Push price ticks to subscribers instantly via WebSocket instead of REST polling. Add a minimal terminal-style browser dashboard so all results are visible without curling endpoints.
 
 **`app/core/websocket_manager.py`**:
 ```python
@@ -339,12 +348,29 @@ Message pushed to clients:
 }
 ```
 
+**`app/static/index.html`** — single HTML file, no framework, no build step. Served by FastAPI via `StaticFiles`. Dark background, monospace font, terminal aesthetic.
+
+What it shows:
+- Live price ticker per symbol — subscribes to `ws://localhost:8000/ws/prices/{symbol}`
+- Active alerts table — polls `GET /alerts/active` every 10s
+- Portfolio snapshot — polls `GET /portfolios/{id}/snapshot` every 10s
+- Claude insight output — fetches `GET /insights/{symbol}` on demand
+
+Served at `http://localhost:8000/ui`. Two lines added to `main.py`:
+```python
+from fastapi.staticfiles import StaticFiles
+app.mount("/ui", StaticFiles(directory="app/static"), name="static")
+```
+
 Add `aiokafka` to requirements.txt.
 
 ```bash
-# Test with wscat (npm install -g wscat)
+# Test WebSocket with wscat (npm install -g wscat)
 wscat -c "ws://localhost:8000/ws/prices/AAPL"
 # → Receives a message every time AAPL is polled
+
+# Open dashboard
+open http://localhost:8000/ui
 ```
 
 ---
@@ -432,11 +458,11 @@ curl http://localhost:8000/metrics | grep http_request_duration
 ```
 Phase 1  →  2 file edits            →  bugs fixed, service runs correctly
 Phase 2  →  ~8 edits + 1 migration  →  partitioned DB, async, tuned Kafka
-Phase 3  →  8 new files + 1 mig     →  anomaly detection + per-symbol Claude
+Phase 3  →  8 new files + 1 mig     →  anomaly detection + per-symbol Claude  ✅
 Phase 4  →  3 new files + 1 edit    →  structured logs, health, request IDs
 Phase 5  →  4 new files + 1 mig     →  portfolio management, live P&L tracking
 Phase 6  →  4 new files             →  RSI/MACD/BB, VaR, Sharpe, correlations
-Phase 7  →  3 new files + 1 edit    →  WebSocket real-time price streaming
+Phase 7  →  3 new files + 2 edits   →  WebSocket real-time streaming + terminal dashboard (app/static/index.html)
 Phase 8  →  3 new files + 1 edit    →  Claude portfolio intelligence + Q&A
 Phase 9  →  5 new files + 1 edit    →  rate limiting, auth, Prometheus, webhooks
 ```

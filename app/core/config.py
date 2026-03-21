@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str
     POSTGRES_DB: str
+    anthropic_api_key: str
 
     class Config:
         env_file = ".env"

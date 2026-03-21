@@ -101,6 +101,22 @@ services:
     env_file:
       - ../.env
 
+  anomaly_consumer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: anomaly-consumer
+    command: sh -c "sleep 10 && python scripts/run_anomaly_consumer.py"
+    volumes:
+      - ../:/app
+    depends_on:
+      kafka:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    env_file:
+      - ../.env
+
   adminer:
     image: adminer
     container_name: adminer

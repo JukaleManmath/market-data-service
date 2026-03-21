@@ -8,25 +8,25 @@ This file gives Claude instant project context. Read this before scanning files.
 
 A **Portfolio Intelligence Platform** built on top of a real-time financial data pipeline.
 
-**End goal:** A system a quantitative analyst or portfolio manager would actually use — live price monitoring, anomaly detection, technical indicators, portfolio risk metrics (VaR, Sharpe), WebSocket streaming, and Claude-powered natural language portfolio Q&A.
+**End goal:** A system a quantitative analyst or portfolio manager would actually use — live price monitoring, anomaly detection, technical indicators, portfolio risk metrics (VaR, Sharpe), WebSocket streaming, Claude-powered natural language portfolio Q&A, and a minimal terminal-style browser dashboard to make everything visible without curling endpoints.
 
 Full 9-phase build plan is in [README.md](README.md).
 
 ---
 
-## Current State — Phase 2 Complete
+## Current State — Phase 3 Complete
 
-DB partitioned, fully async stack (SQLAlchemy + Redis), Kafka tuned. Ready for Phase 3.
+Anomaly detection (z-score + MA crossover) live, alerts table in DB, Claude per-symbol insights cached in Redis. Ready for Phase 4.
 
 | Phase | What | Status |
 |-------|------|--------|
 | 1 | Fix 3 bugs + OOP/SOLID refactor (provider abstraction, PriceService, MovingAverageService) | **Done** |
 | 2 | DB partitioning, async SQLAlchemy, async Redis, Kafka tuning | **Done** |
-| 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | Not started |
+| 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | **Done** |
 | 4 | JSON logging, RequestID middleware, /health endpoint | Not started |
 | 5 | Portfolio model, live P&L snapshot, position management | Not started |
 | 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | Not started |
-| 7 | WebSocket streaming via aiokafka broadcaster | Not started |
+| 7 | WebSocket streaming via aiokafka broadcaster + minimal terminal UI (`app/static/index.html`) | Not started |
 | 8 | Claude portfolio intelligence + natural language Q&A | Not started |
 | 9 | Rate limiting, API key auth, Prometheus + Grafana, webhooks | Not started |
 
@@ -40,6 +40,8 @@ app/
   api/
     prices.py                          # GET /prices/latest?symbol=&provider=
     poll.py                            # POST /prices/poll
+    alerts.py                          # GET /alerts/active, POST /alerts/{id}/resolve
+    insights.py                        # GET /insights/{symbol} — Claude summary
   core/
     config.py                          # Settings via pydantic-settings (reads .env)
     redis.py                           # Async redis_client (redis.asyncio.Redis)
@@ -49,25 +51,33 @@ app/
   kafka/
     producer.py                        # send_price_event() → price-events topic
     consumer.py                        # start_consumer() — Kafka loop, delegates to MovingAverageService
+    anomaly_consumer.py                # start_consumer() — anomaly-consumer-group, delegates to AnomalyDetector
   models/
     price_points.py                    # PricePoint — symbol, price, timestamp, provider, raw_data_id
     polling_jobs.py                    # PollingJob — symbol, provider, interval, status, last_polled_at
     raw_market_data.py                 # RawMarketData — raw JSON from external APIs
     moving_average.py                  # MovingAverage — 5-pt MA results
+    alerts.py                          # Alert — anomaly_type, severity, price, z_score, fast_ma, slow_ma, resolved
   schemas/
     price.py                           # PriceResponse
     poll.py                            # PollingRequest / PollingResponse
+    alerts.py                          # AlertResponse
   services/
     price_service.py                   # PriceService — 3-tier fetch orchestrator (injected deps)
     polling_worker_service.py          # polling_worker() — background task, builds PriceService per job
     moving_average_service.py          # MovingAverageService — MA calc + dedup persistence
+    anomaly_detector.py                # AnomalyDetector — z-score (N=20, 3σ/4σ) + MA divergence (0.5%)
+    ai_insights.py                     # AIInsightsService — AsyncAnthropic claude-sonnet-4-6, Redis 5 min cache
     providers/
       base.py                          # BaseProvider ABC + PriceFetchResult dataclass
       finnhub.py                       # FinnhubProvider(BaseProvider)
       alpha_vantage.py                 # AlphaVantageProvider(BaseProvider)
       registry.py                      # get_provider(name) → BaseProvider instance
+static/
+  index.html                           # Phase 7 — single-file terminal dashboard (vanilla JS, no build step)
 scripts/
   run_ma_consumer.py                   # Entry point for ma-consumer container
+  run_anomaly_consumer.py              # Entry point for anomaly-consumer container
 docker/
   docker-compose.yml                   # All 8 containers
   entrypoint.sh                        # Waits for Postgres → alembic upgrade head → uvicorn
@@ -139,7 +149,7 @@ MA Consumer (separate container, price-events topic):
 | `moving_average` | symbol, average_price, interval=5, provider, timestamp | 5-pt MA, deduped by timestamp |
 
 **Phase 2 done:** monthly `RANGE` partitioning on `price_points(timestamp)`. Partitions exist for 2026-03 through 2027-12 plus `price_points_future`.
-**Phase 3 adds:** `alerts` table with `AlertSeverity` and `AnomalyType` enums.
+**Phase 3 done:** `alerts` table with `alertseverity` and `anomalytype` Postgres enums + `resolved` boolean. Migration uses raw `op.execute()` SQL throughout — `op.create_table()` with `create_type=False` was silently ignored by SQLAlchemy, causing `DuplicateObject` errors.
 **Phase 5 adds:** `portfolios` and `positions` tables.
 
 ---
@@ -179,7 +189,7 @@ ALERT_WEBHOOK_URLS        # Comma-separated webhook URLs
 | `adminer` | 8080 | DB admin UI |
 | `kafka-init` | — | One-shot topic creation |
 
-**Phase 3 adds:** `anomaly_consumer` container.
+**Phase 3 done:** `anomaly_consumer` container added.
 **Phase 9 adds:** `prometheus` (9090) and `grafana` (3000).
 
 ---
@@ -194,10 +204,11 @@ Current `requirements/requirements.txt`:
 - `httpx` — async HTTP for external APIs
 - `pydantic-settings` — config
 
+**Phase 3 added:** `anthropic`
+
 **To add per phase:**
 - Phase 6: `numpy`, `scipy`
 - Phase 7: `aiokafka`
-- Phase 8: `anthropic`
 - Phase 9: `prometheus-client`
 
 ---
@@ -250,3 +261,5 @@ docker compose -f docker/docker-compose.yml down -v
 - **MA consumer uses sync session** — `SessionLocal`, not `AsyncSessionLocal`. confluent_kafka's poll loop is blocking.
 - **price_points PK is `(id, timestamp)`** — Postgres requires the partition key in every unique constraint. Queries filtering only on `id` won't use the PK index efficiently; always include `timestamp`.
 - **`--env-file .env` is required** — the compose file is in `docker/`, so Docker Compose won't find the root `.env` automatically. Always pass `--env-file .env` from the project root.
+- **Never use `op.create_table()` with Enum columns** — SQLAlchemy ignores `create_type=False` inside `op.create_table()` and emits a second `CREATE TYPE`, causing `DuplicateObject` errors. Always use `op.execute()` with raw SQL for the full CREATE TABLE when the table references custom Postgres enum types. See `c3f9a12b4e01_add_alerts_table.py`.
+- **`anomaly_consumer` service key vs container name** — the Docker Compose service key is `anomaly_consumer` (underscore); the container name is `anomaly-consumer` (hyphen). `docker compose logs` takes the service key.
