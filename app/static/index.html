@@ -60,15 +60,20 @@
     .health-dot.err { background: var(--red); }
     .titlebar-clock { color: var(--muted); font-size: 11px; }
 
-    /* ── Dashboard — 4-row grid filling remaining height ── */
+    /* ── Dashboard — 5-row grid filling remaining height ── */
     .dashboard {
       flex: 1;
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
       display: grid;
-      grid-template-rows: 120px 1fr 1fr 120px;
+      grid-template-rows: 120px 1fr 1fr 220px 120px;
       gap: 6px;
       padding: 6px;
     }
+
+    /* ── Chart panels ── */
+    .chart-container { position: relative; width: 100%; height: 160px; }
+    canvas { display: block; background: transparent; }
 
     /* ── Rows ── */
     .row { display: grid; gap: 6px; overflow: hidden; }
@@ -378,6 +383,13 @@
               <button class="btn" onclick="createPortfolio()">Create</button>
             </div>
             <div class="hint" id="port-hint">Create a portfolio or load an existing one by UUID.</div>
+            <!-- Demo portfolio quick-load — shown only when no portfolio in localStorage -->
+            <div id="demo-port-hint" style="display:none; margin-top:6px;">
+              <span class="muted" style="font-size:10px">Have a demo UUID? </span>
+              <input id="demo-port-uuid" placeholder="paste demo portfolio UUID" style="width:210px; margin-left:4px"
+                onkeydown="if(event.key==='Enter')loadDemoPortfolio()" />
+              <button class="btn btn-yellow btn-sm" onclick="loadDemoPortfolio()" style="margin-left:4px">Load Demo</button>
+            </div>
           </div>
 
           <hr class="sep" />
@@ -413,6 +425,14 @@
               <tr><td colspan="9" class="muted">No positions.</td></tr>
             </tbody>
           </table>
+
+          <!-- Allocation donut chart — shown when ≥2 positions loaded -->
+          <div id="alloc-chart-wrap" style="display:none; margin-top:8px;">
+            <div class="muted" style="font-size:9px; text-transform:uppercase; letter-spacing:0.07em; margin-bottom:4px;">Allocation</div>
+            <div style="height:120px; position:relative;">
+              <canvas id="alloc-chart"></canvas>
+            </div>
+          </div>
 
         </div>
       </div>
@@ -464,7 +484,9 @@
             <button class="btn btn-blue" onclick="fetchIndicators()">Run</button>
             <span class="notice">needs 35+ price points for MACD</span>
           </div>
-          <div class="metric-grid" id="indicator-grid"></div>
+          <div class="metric-grid" id="indicator-grid">
+            <span class="muted notice" style="font-size:10px">Enter a symbol and run analysis.</span>
+          </div>
           <div style="margin-top:4px">
             <div id="indicator-signal"></div>
             <div id="indicator-reasons" style="margin-top:3px;font-size:10px;color:var(--muted)"></div>
@@ -484,7 +506,9 @@
             <button class="btn btn-blue btn-sm" onclick="checkDataPoints()">Check Data Points</button>
           </div>
           <div id="data-points-summary" style="margin-top:4px;font-size:10px"></div>
-          <div class="metric-grid" id="risk-grid" style="margin-top:5px"></div>
+          <div class="metric-grid" id="risk-grid" style="margin-top:5px">
+            <span class="muted notice" style="font-size:10px">Run risk analysis to see metrics.</span>
+          </div>
           <div id="risk-warning" style="margin-top:4px;font-size:10px;color:var(--yellow)"></div>
           <div id="risk-correlation" style="margin-top:5px"></div>
         </div>
@@ -492,7 +516,33 @@
 
     </div>
 
-    <!-- ════ ROW 4 — Claude Insights ════ -->
+    <!-- ════ ROW 4 — Price History Chart ════ -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">&#9661; Price History</span>
+        <span class="panel-status" id="chart-status">enter symbol and load</span>
+      </div>
+      <div class="panel-body" style="overflow:hidden">
+        <div class="controls" style="margin-bottom:5px">
+          <label>Sym</label>
+          <input id="chart-sym" class="uppercase" placeholder="AAPL" maxlength="10" style="width:55px"
+            onkeydown="if(event.key==='Enter')loadPriceChart()" />
+          <select id="chart-provider">
+            <option value="finnhub">finnhub</option>
+            <option value="alpha_vantage">alpha_vantage</option>
+          </select>
+          <label>pts</label>
+          <input id="chart-limit" type="number" value="100" min="10" max="500" style="width:48px" />
+          <button class="btn btn-blue" onclick="loadPriceChart()">Load Chart</button>
+          <span class="notice" id="chart-hint">seed demo data first · run: docker exec marketdata-api python scripts/seed_demo.py</span>
+        </div>
+        <div class="chart-container">
+          <canvas id="price-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════ ROW 5 — Claude Insights ════ -->
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">&#9670; Claude Insights</span>
@@ -515,6 +565,7 @@
   </div><!-- /dashboard -->
 </div><!-- /terminal-window -->
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script>
 // ── Clock ──────────────────────────────────────────────────────
 setInterval(() => {
@@ -530,7 +581,11 @@ let lastSnapshot      = null;    // cached for checkDataPoints
 const sockets         = {};
 const activeJobs      = [];      // { symbol, provider, interval, jobId }
 
-if (portfolioId) activatePortfolio(portfolioId, portfolioName, false);
+if (portfolioId) {
+  activatePortfolio(portfolioId, portfolioName, false);
+} else {
+  document.getElementById('demo-port-hint').style.display = 'block';
+}
 
 // ══════════════════════════════════════════════════════════════
 // HEALTH
@@ -725,6 +780,7 @@ function activatePortfolio(id, name, persist) {
   document.getElementById('badge-id').textContent              = `ID: ${id}`;
   document.getElementById('port-create-section').style.display = 'none';
   document.getElementById('port-switch-section').style.display = 'none';
+  document.getElementById('demo-port-hint').style.display      = 'none';
 
   document.getElementById('port-status').textContent = name;
   document.getElementById('pos-hint').textContent    = `Adding to: ${name}`;
@@ -759,6 +815,9 @@ function clearPortfolio() {
   document.getElementById('port-badge').style.display          = 'none';
   document.getElementById('port-switch-section').style.display = 'none';
   document.getElementById('port-create-section').style.display = 'block';
+  document.getElementById('demo-port-hint').style.display      = 'block';
+  document.getElementById('alloc-chart-wrap').style.display    = 'none';
+  if (allocChartInstance) { allocChartInstance.destroy(); allocChartInstance = null; }
   document.getElementById('port-summary').style.display        = 'none';
   document.getElementById('port-status').textContent           = 'no portfolio loaded';
   document.getElementById('pos-hint').textContent              = 'Create a portfolio above first.';
@@ -874,6 +933,8 @@ function renderSnapshot(snap) {
         </tr>`;
       }).join('')
     : '<tr><td colspan="9" class="muted">No open positions.</td></tr>';
+
+  renderAllocationChart(snap.positions);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1055,6 +1116,172 @@ async function fetchInsight() {
 function clearInsight() {
   document.getElementById('insights-output').innerHTML =
     '<span class="muted">Enter a symbol and press Fetch Insight.</span>';
+}
+
+// ══════════════════════════════════════════════════════════════
+// PRICE HISTORY CHART — GET /prices/history
+// ══════════════════════════════════════════════════════════════
+let priceChartInstance = null;
+
+async function loadPriceChart() {
+  const sym      = document.getElementById('chart-sym').value.trim().toUpperCase();
+  const provider = document.getElementById('chart-provider').value;
+  const limit    = parseInt(document.getElementById('chart-limit').value) || 100;
+  if (!sym) return;
+
+  document.getElementById('chart-status').textContent = 'loading…';
+  document.getElementById('chart-hint').textContent   = '';
+
+  try {
+    const res = await fetch(`/prices/history?symbol=${sym}&provider=${provider}&limit=${limit}`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (!data.length) {
+      document.getElementById('chart-status').textContent = 'no data — seed demo data first';
+      return;
+    }
+
+    const labels = data.map(d =>
+      new Date(d.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    );
+    const prices = data.map(d => d.price);
+
+    const canvas  = document.getElementById('price-chart');
+    const ctx     = canvas.getContext('2d');
+    const height  = canvas.offsetHeight || 160;
+    const grad    = ctx.createLinearGradient(0, 0, 0, height);
+    grad.addColorStop(0, 'rgba(0,255,136,0.25)');
+    grad.addColorStop(1, 'rgba(0,255,136,0.00)');
+
+    if (priceChartInstance) priceChartInstance.destroy();
+
+    priceChartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: sym,
+          data: prices,
+          borderColor: '#00ff88',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: true,
+          backgroundColor: grad,
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#161616',
+            borderColor: '#2a2a2a',
+            borderWidth: 1,
+            titleColor: '#4da6ff',
+            bodyColor: '#cccccc',
+            callbacks: { label: c => `$${fmt(c.parsed.y)}` }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: '#1a1a1a' },
+            ticks: {
+              color: '#555',
+              font: { family: "'Courier New', monospace", size: 9 },
+              maxTicksLimit: 10,
+              maxRotation: 0,
+            }
+          },
+          y: {
+            grid: { color: '#1a1a1a' },
+            ticks: {
+              color: '#555',
+              font: { family: "'Courier New', monospace", size: 9 },
+              callback: v => `$${fmt(v)}`
+            }
+          }
+        }
+      }
+    });
+
+    document.getElementById('chart-status').textContent = `${sym} · ${data.length} pts · ${ts()}`;
+  } catch (err) {
+    document.getElementById('chart-status').textContent = `error: ${err.message}`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PORTFOLIO ALLOCATION CHART
+// ══════════════════════════════════════════════════════════════
+let allocChartInstance = null;
+const ALLOC_COLORS = ['#00ff88', '#4da6ff', '#ffcc00', '#ff4466', '#00ccff', '#ff8800'];
+
+function renderAllocationChart(positions) {
+  const wrap = document.getElementById('alloc-chart-wrap');
+  if (!positions || positions.length < 2) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = 'block';
+
+  const labels  = positions.map(p => p.symbol);
+  const weights = positions.map(p => parseFloat((p.weight * 100).toFixed(1)));
+  const colors  = positions.map((_, i) => ALLOC_COLORS[i % ALLOC_COLORS.length]);
+
+  const ctx = document.getElementById('alloc-chart').getContext('2d');
+  if (allocChartInstance) allocChartInstance.destroy();
+
+  allocChartInstance = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{
+        data: weights,
+        backgroundColor: colors.map(c => c + '33'),
+        borderColor: colors,
+        borderWidth: 1.5,
+        hoverBackgroundColor: colors.map(c => c + '55'),
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '65%',
+      plugins: {
+        legend: {
+          display: true,
+          position: 'right',
+          labels: {
+            color: '#cccccc',
+            font: { family: "'Courier New', monospace", size: 9 },
+            boxWidth: 8,
+            padding: 6,
+          }
+        },
+        tooltip: {
+          backgroundColor: '#161616',
+          borderColor: '#2a2a2a',
+          borderWidth: 1,
+          titleColor: '#4da6ff',
+          bodyColor: '#cccccc',
+          callbacks: { label: c => `${c.label}: ${c.parsed}%` }
+        }
+      }
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// DEMO PORTFOLIO — quick-load from seed_demo.py UUID
+// ══════════════════════════════════════════════════════════════
+function loadDemoPortfolio() {
+  const id = document.getElementById('demo-port-uuid').value.trim();
+  if (!id) return;
+  document.getElementById('switch-id').value = id;
+  loadPortfolio();
 }
 
 // ── Helpers ────────────────────────────────────────────────────
