@@ -68,3 +68,27 @@ class PortfolioSnapshot(BaseModel):
     total_value: float
     total_pnl: float
     positions: list[PositionSnapshot]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — Claude intelligence
+# ---------------------------------------------------------------------------
+
+class PortfolioAnalysisResponse(BaseModel):
+    portfolio_id: str
+    regime: str                       # "risk-on" | "risk-off" | "neutral" | "unknown"
+    risks: list[str]                  # top 2-3 risks citing specific metrics
+    recommendations: list[str]        # rebalancing suggestions with quantitative reasoning
+    alert_explanations: list[str]     # plain-English explanation of each active alert
+    narrative: str                    # 3-sentence regime assessment in full prose
+    cached: bool
+
+
+class AskQuestionRequest(BaseModel):
+    question: str
+
+
+class AskQuestionResponse(BaseModel):
+    question: str
+    answer: str
+    cached: bool

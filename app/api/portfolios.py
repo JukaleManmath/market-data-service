@@ -8,11 +8,16 @@ from app.core.redis import redis_client
 from app.database.session import get_async_db
 from app.schemas.portfolio import (
     AddPositionRequest,
+    AskQuestionRequest,
+    AskQuestionResponse,
     CreatePortfolioRequest,
+    PortfolioAnalysisResponse,
     PortfolioResponse,
     PortfolioSnapshot,
     PositionResponse,
 )
+from app.services.market_qa import MarketQAService
+from app.services.portfolio_intelligence import PortfolioIntelligenceService
 from app.services.portfolio_service import PortfolioService
 
 logger = logging.getLogger(__name__)
@@ -96,3 +101,47 @@ async def get_snapshot(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     return snapshot
+
+
+@router.get("/{portfolio_id}/analysis", response_model=PortfolioAnalysisResponse)
+async def get_portfolio_analysis(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_async_db),
+) -> PortfolioAnalysisResponse:
+    """
+    Claude full portfolio analysis.
+
+    Gathers snapshot, risk metrics, technical indicators, active alerts, and
+    7-day price changes, then returns a structured Claude analyst report:
+    market regime, top risks, rebalancing recommendations, alert explanations.
+
+    Cached in Redis for 5 minutes.
+    """
+    try:
+        svc = PortfolioIntelligenceService(db=db, cache=redis_client)
+        result = await svc.analyze(portfolio_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return PortfolioAnalysisResponse(**result)
+
+
+@router.post("/{portfolio_id}/ask", response_model=AskQuestionResponse)
+async def ask_portfolio_question(
+    portfolio_id: UUID,
+    body: AskQuestionRequest,
+    db: AsyncSession = Depends(get_async_db),
+) -> AskQuestionResponse:
+    """
+    Natural language Q&A about the portfolio.
+
+    Claude uses tool use to actively fetch price history, technical indicators,
+    and correlations from the database to answer the question.
+
+    Cached per (portfolio_id, question) for 2 minutes.
+    """
+    try:
+        svc = MarketQAService(db=db, cache=redis_client)
+        result = await svc.ask(portfolio_id, body.question)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return AskQuestionResponse(**result)

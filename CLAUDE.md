@@ -14,9 +14,9 @@ Full 9-phase build plan is in [README.md](README.md).
 
 ---
 
-## Current State — Phase 7 Complete
+## Current State — Phase 8 Complete
 
-WebSocket streaming live. Terminal dashboard at `http://localhost:8000/ui` covers all API routes. Ready for Phase 8.
+Claude portfolio intelligence live. `GET /portfolios/{id}/analysis` returns structured analyst report. `POST /portfolios/{id}/ask` answers natural language questions using Claude tool use. Dashboard covers all 16 routes. Ready for Phase 9.
 
 | Phase | What | Status |
 |-------|------|--------|
@@ -27,7 +27,7 @@ WebSocket streaming live. Terminal dashboard at `http://localhost:8000/ui` cover
 | 5 | Portfolio model, live P&L snapshot, position management | **Done** |
 | 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | **Done** |
 | 7 | WebSocket streaming via aiokafka broadcaster + terminal dashboard (`app/static/index.html`) | **Done** |
-| 8 | Claude portfolio intelligence + natural language Q&A | Not started |
+| 8 | Claude portfolio intelligence + natural language Q&A | **Done** |
 | 9 | Rate limiting, API key auth, Prometheus + Grafana, webhooks | Not started |
 
 ---
@@ -85,13 +85,17 @@ app/
     technical_analysis.py              # TechnicalAnalysisService — RSI (14), MACD (12/26/9 EMA), Bollinger Bands (20, 2σ)
     signal_generator.py                # SignalGenerator — voting on RSI/MACD/Bollinger → BUY/SELL/HOLD + confidence
     risk_engine.py                     # RiskEngine — parametric VaR (95%), Sharpe, max drawdown, correlation matrix
+    portfolio_intelligence.py          # PortfolioIntelligenceService — full-context Claude analyst report, Redis 5 min cache
+    market_qa.py                       # MarketQAService — Claude tool-use Q&A (get_price_history, get_technical_indicators, get_correlation), Redis 2 min cache
     providers/
       base.py                          # BaseProvider ABC + PriceFetchResult dataclass
       finnhub.py                       # FinnhubProvider(BaseProvider)
       alpha_vantage.py                 # AlphaVantageProvider(BaseProvider)
       registry.py                      # get_provider(name) → BaseProvider instance
+  prompts/
+    portfolio_analysis.py              # build_analysis_prompt(), build_qa_system_prompt(), build_qa_user_prompt() — prompt text versioned separately from services
 static/
-  index.html                           # Phase 7 — single-file terminal dashboard (vanilla JS, no build step). Served at /ui
+  index.html                           # Phase 7–8 — single-file terminal dashboard (vanilla JS, no build step). Served at /ui. Covers all 16 routes including analysis + Q&A panels.
 scripts/
   run_ma_consumer.py                   # Entry point for ma-consumer container
   run_anomaly_consumer.py              # Entry point for anomaly-consumer container

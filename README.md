@@ -402,49 +402,62 @@ curl -X DELETE "http://localhost:8000/prices/poll/{job_id}"
 
 ---
 
-### Phase 8 — Claude Portfolio Intelligence
+### Phase 8 — Claude Portfolio Intelligence ✅
 
 **Goal:** Claude analyzes the full portfolio context (P&L, risk, indicators, alerts) and answers natural language questions. Moves from per-symbol summaries to portfolio-aware reasoning.
 
-**`app/services/portfolio_intelligence.py`**:
-1. Fetch portfolio snapshot, risk metrics, indicators for each held symbol, active alerts
-2. Build structured prompt with all context
-3. `await anthropic.AsyncAnthropic().messages.create(model="claude-sonnet-4-6", ...)`
-4. Cache result in Redis for 5 minutes
+New files:
+
+| File | Purpose |
+|------|---------|
+| `app/services/portfolio_intelligence.py` | Fetches snapshot + risk + indicators + alerts + 7-day price changes, builds structured prompt, calls Claude, parses JSON. Cached 5 min. |
+| `app/services/market_qa.py` | Claude tool-use Q&A loop — Claude actively calls `get_price_history`, `get_technical_indicators`, `get_correlation` to fetch data rather than reading a static snapshot. Cached 2 min per (portfolio_id, question). |
+| `app/prompts/portfolio_analysis.py` | Prompt builders isolated in their own module — `build_analysis_prompt()`, `build_qa_system_prompt()`, `build_qa_user_prompt()`. |
+
+**`app/services/portfolio_intelligence.py`** — context assembly:
+1. `get_snapshot()` — live P&L per position
+2. `RiskEngine.compute()` — VaR, Sharpe, drawdown, correlation matrix
+3. `TechnicalAnalysisService.compute()` + `SignalGenerator.generate()` per symbol → RSI, MACD, Bollinger, BUY/SELL/HOLD
+4. Unresolved `Alert` rows for held symbols
+5. 7-day price change per symbol (latest vs oldest within 7-day window from `price_points`)
 
 **Prompt structure** (`app/prompts/portfolio_analysis.py`):
 ```
-You are a quantitative portfolio analyst. Given:
-- Portfolio snapshot: {snapshot}
-- Risk metrics: {VaR, Sharpe, drawdown}
-- Technical indicators per symbol: {RSI, MACD, Bollinger}
-- Active anomaly alerts: {alerts}
-- 7-day price changes: {price_changes}
+You are a quantitative portfolio analyst. Respond ONLY with valid JSON.
+Given: snapshot, risk metrics, indicators per symbol, active alerts, 7-day price changes.
 
-Provide:
-1. A 3-sentence market regime assessment (risk-on/risk-off/neutral)
-2. Top 2-3 portfolio risks, citing specific metrics
-3. One concrete rebalancing suggestion with quantitative reasoning
-4. Plain-English explanation of any active alerts
+Return JSON with keys:
+  "regime":              "risk-on" | "risk-off" | "neutral"
+  "risks":               array of 2-3 strings citing specific metrics
+  "recommendations":     array of strings with quantitative reasoning
+  "alert_explanations":  array of plain-English alert explanations
+  "narrative":           3-sentence regime assessment in full prose
 ```
 
-**`app/services/market_qa.py`** — natural language Q&A:
-- User sends any question about their portfolio or a symbol
-- Service fetches relevant data, builds context, Claude answers
-- Cache per `(hash(question), frozenset(symbols))` for 2 min
+**`app/services/market_qa.py`** — Claude tool-use agentic loop:
+- Claude calls tools to fetch data it needs (no pre-loaded static snapshot)
+- Loop: send question → if `stop_reason == "tool_use"`, execute tools, append results, repeat → return final text
+- Tools: `get_price_history(symbol, days)`, `get_technical_indicators(symbol)`, `get_correlation(symbol_a, symbol_b)`
 
-**Optional — Claude tool use** (makes Claude an active data participant, not just a text generator):
-- Tool: `get_price_history(symbol, days)` → your DB
-- Tool: `get_technical_indicators(symbol)` → returns RSI/MACD/BB
-- Tool: `get_correlation(symbol_a, symbol_b)` → correlation coefficient
+**New API endpoints** (`app/api/portfolios.py`):
+
+| Endpoint | Schema |
+|----------|--------|
+| `GET /portfolios/{id}/analysis` | `PortfolioAnalysisResponse` — `regime`, `risks`, `recommendations`, `alert_explanations`, `narrative`, `cached` |
+| `POST /portfolios/{id}/ask` | `AskQuestionRequest` → `AskQuestionResponse` — `question`, `answer`, `cached` |
+
+**Dashboard additions** (`app/static/index.html`):
+- Portfolio Intelligence panel — Analyze button → `GET /portfolios/{id}/analysis`
+- Q&A panel — text input + Ask button → `POST /portfolios/{id}/ask`
 
 ```bash
-curl http://localhost:8000/portfolios/1/analysis
-# → {regime: "risk-off", risks: [...], recommendations: [...], narrative: "..."}
+curl http://localhost:8000/portfolios/{id}/analysis
+# → {"regime": "risk-off", "risks": [...], "recommendations": [...], "narrative": "..."}
 
-curl -X POST http://localhost:8000/portfolios/1/ask \
+curl -X POST http://localhost:8000/portfolios/{id}/ask \
+  -H "Content-Type: application/json" \
   -d '{"question": "Should I reduce my NVDA position given current volatility?"}'
-# → {"answer": "NVDA is showing RSI of 74 (overbought territory)..."}
+# → {"question": "...", "answer": "NVDA is showing RSI of 74 (overbought territory)...", "cached": false}
 ```
 
 ---
@@ -490,7 +503,7 @@ Phase 4  →  3 new files + 1 edit    →  structured logs, health, request IDs 
 Phase 5  →  6 new files + 3 edits   →  portfolio management, live P&L tracking  ✅
 Phase 6  →  5 new files             →  RSI/MACD/BB, VaR, Sharpe, correlations  ✅
 Phase 7  →  3 new files + 3 edits   →  WebSocket real-time streaming + terminal dashboard  ✅
-Phase 8  →  3 new files + 1 edit    →  Claude portfolio intelligence + Q&A
+Phase 8  →  3 new files + 1 edit    →  Claude portfolio intelligence + Q&A  ✅
 Phase 9  →  5 new files + 1 edit    →  rate limiting, auth, Prometheus, webhooks
 ```
 
@@ -512,5 +525,7 @@ Phase 9  →  5 new files + 1 edit    →  rate limiting, auth, Prometheus, webh
 | `app/services/signal_generator.py` | Phase 6 — BUY/SELL/HOLD voting logic |
 | `app/services/risk_engine.py` | Phase 6 core — numpy VaR/Sharpe/drawdown/correlation |
 | `app/core/websocket_manager.py` | Phase 7 core — in-memory pub/sub |
-| `app/services/portfolio_intelligence.py` | Phase 8 core — Claude context builder |
+| `app/services/portfolio_intelligence.py` | Phase 8 — full-context Claude analyst report (snapshot + risk + indicators + alerts) |
+| `app/services/market_qa.py` | Phase 8 — Claude tool-use Q&A agentic loop |
+| `app/prompts/portfolio_analysis.py` | Phase 8 — prompt builders, versioned separately from services |
 | `docker/docker-compose.yml` | Updated each phase |

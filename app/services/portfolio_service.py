@@ -5,6 +5,7 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.kafka.producer import send_portfolio_event
@@ -108,7 +109,11 @@ class PortfolioService:
             self.db.add(position)
             logger.info(f"[Portfolio] Opened position {symbol} in portfolio {portfolio_id}")
 
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            raise ValueError(f"Portfolio {portfolio_id} not found")
         await self.db.refresh(position)
 
         await send_portfolio_event(
