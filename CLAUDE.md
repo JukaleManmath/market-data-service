@@ -8,27 +8,22 @@ This file gives Claude instant project context. Read this before scanning files.
 
 A **Portfolio Intelligence Platform** built on top of a real-time financial data pipeline.
 
-**End goal:** A system a quantitative analyst or portfolio manager would actually use — live price monitoring, anomaly detection, technical indicators, portfolio risk metrics (VaR, Sharpe), WebSocket streaming, Claude-powered natural language portfolio Q&A, and a minimal terminal-style browser dashboard to make everything visible without curling endpoints.
-
-Full 9-phase build plan is in [README.md](README.md).
+**What it does:** Live price ingestion from multiple providers (Finnhub, Alpha Vantage) via a pluggable provider abstraction → Kafka streaming → partitioned PostgreSQL → Redis caching. Extended with technical analysis (RSI, MACD, Bollinger Bands), portfolio risk metrics (VaR, Sharpe, max drawdown, correlation), z-score anomaly detection, WebSocket streaming, a terminal-style browser dashboard, and Claude-powered natural language portfolio Q&A.
 
 ---
 
-## Current State — Phase 8 Complete
-
-Claude portfolio intelligence live. `GET /portfolios/{id}/analysis` returns structured analyst report. `POST /portfolios/{id}/ask` answers natural language questions using Claude tool use. Dashboard covers all 16 routes. Ready for Phase 9.
+## Current State — Complete (8 Phases Done)
 
 | Phase | What | Status |
 |-------|------|--------|
-| 1 | Fix 3 bugs + OOP/SOLID refactor (provider abstraction, PriceService, MovingAverageService) | **Done** |
+| 1 | Bug fixes + OOP/SOLID refactor (provider abstraction, PriceService, MovingAverageService) | **Done** |
 | 2 | DB partitioning, async SQLAlchemy, async Redis, Kafka tuning | **Done** |
 | 3 | Anomaly detection (z-score + MA crossover) + Claude per-symbol summaries | **Done** |
 | 4 | JSON logging, RequestID middleware, /health endpoint | **Done** |
 | 5 | Portfolio model, live P&L snapshot, position management | **Done** |
 | 6 | RSI/MACD/Bollinger, VaR/Sharpe/correlation (numpy) | **Done** |
-| 7 | WebSocket streaming via aiokafka broadcaster + terminal dashboard (`app/static/index.html`) | **Done** |
+| 7 | WebSocket streaming via aiokafka broadcaster + terminal dashboard | **Done** |
 | 8 | Claude portfolio intelligence + natural language Q&A | **Done** |
-| 9 | Rate limiting, API key auth, Prometheus + Grafana, webhooks | Not started |
 
 ---
 
@@ -41,9 +36,13 @@ app/
     prices.py                          # GET /prices/latest?symbol=&provider=
     poll.py                            # POST /prices/poll, DELETE /prices/poll/{job_id}
     alerts.py                          # GET /alerts/active (symbol/provider optional), POST /alerts/{id}/resolve
-    insights.py                        # GET /insights/{symbol} — Claude summary
+    insights.py                        # GET /insights/{symbol} — Claude per-symbol summary
     health.py                          # GET /health — Postgres SELECT 1 + Redis PING
-    portfolios.py                      # POST /portfolios, DELETE /portfolios/{id}, POST/DELETE /portfolios/{id}/positions, GET /portfolios/{id}/snapshot
+    portfolios.py                      # POST /portfolios, DELETE /portfolios/{id},
+                                       # POST/DELETE /portfolios/{id}/positions,
+                                       # GET /portfolios/{id}/snapshot,
+                                       # GET /portfolios/{id}/analysis,
+                                       # POST /portfolios/{id}/ask
     analytics.py                       # GET /analytics/{symbol}/indicators, GET /analytics/portfolios/{id}/risk
     stream.py                          # WS /ws/prices/{symbol} — WebSocket price stream
   core/
@@ -73,7 +72,9 @@ app/
     price.py                           # PriceResponse
     poll.py                            # PollingRequest / PollingResponse
     alerts.py                          # AlertResponse
-    portfolio.py                       # CreatePortfolioRequest, PortfolioResponse, AddPositionRequest, PositionResponse, PortfolioSnapshot (includes position_id)
+    portfolio.py                       # CreatePortfolioRequest, PortfolioResponse, AddPositionRequest,
+                                       # PositionResponse, PortfolioSnapshot, PositionSnapshot,
+                                       # PortfolioAnalysisResponse, AskQuestionRequest, AskQuestionResponse
     analytics.py                       # IndicatorResponse, RiskResponse, MACDSchema, BollingerSchema
   services/
     price_service.py                   # PriceService — 3-tier fetch orchestrator (injected deps)
@@ -93,9 +94,9 @@ app/
       alpha_vantage.py                 # AlphaVantageProvider(BaseProvider)
       registry.py                      # get_provider(name) → BaseProvider instance
   prompts/
-    portfolio_analysis.py              # build_analysis_prompt(), build_qa_system_prompt(), build_qa_user_prompt() — prompt text versioned separately from services
+    portfolio_analysis.py              # build_analysis_prompt(), build_qa_system_prompt(), build_qa_user_prompt()
 static/
-  index.html                           # Phase 7–8 — single-file terminal dashboard (vanilla JS, no build step). Served at /ui. Covers all 16 routes including analysis + Q&A panels.
+  index.html                           # Single-file terminal dashboard (vanilla JS, no build step). Served at /ui. Covers all 18 routes.
 scripts/
   run_ma_consumer.py                   # Entry point for ma-consumer container
   run_anomaly_consumer.py              # Entry point for anomaly-consumer container
@@ -108,7 +109,7 @@ alembic-migrations/
   script.py.mako                       # Template for generating new migration files
   versions/                            # Migration history — applied in order on startup
 requirements/
-  requirements.txt                     # Full stack: fastapi, sqlalchemy[asyncio], asyncpg, redis, confluent_kafka, aiokafka, anthropic, numpy, scipy
+  requirements.txt                     # fastapi, sqlalchemy[asyncio], asyncpg, redis, confluent_kafka, aiokafka, anthropic, numpy, scipy
 ```
 
 ---
@@ -133,13 +134,13 @@ PriceService.get_latest_price(symbol)
 ### Key design decisions
 - **Async SQLAlchemy** — `AsyncSessionLocal` / `AsyncSession` for API + polling worker. Sync `SessionLocal` kept for the MA consumer (confluent_kafka is blocking).
 - **Async Redis** — `redis.asyncio.Redis`. Cache key: `{symbol.lower()}:{provider}`.
-- **confluent_kafka** for both producer and consumer. MA consumer stays sync by design.
+- **confluent_kafka** for producer and MA/anomaly consumers. Both stay sync by design.
 - **Kafka producer** — `acks="all"`, `retries=5`. No per-message `flush()`. Flushed once on app shutdown via lifespan.
 - **PriceService is per-request** — db session is request-scoped, so PriceService is too.
-- **No auth, no rate limiting** — Phase 9.
 - **kafka_broadcaster uses aiokafka** — runs inside FastAPI's event loop as an asyncio task. MA and anomaly consumers still use confluent_kafka (sync, separate containers).
 - **ConnectionManager is a module-level singleton** — `manager = ConnectionManager()` in `websocket_manager.py`. Shared between `stream.py` (WebSocket endpoint) and `kafka_broadcaster.py`.
-- **delete_portfolio() deletes position rows** — uses `DELETE FROM positions WHERE portfolio_id = ?` before deleting the portfolio row. Marking inactive is not enough; the FK constraint requires hard delete.
+- **delete_portfolio() hard-deletes position rows** — uses `DELETE FROM positions WHERE portfolio_id = ?` before deleting the portfolio row. FK constraint requires hard delete.
+- **MarketQAService uses Claude tool use** — Claude actively calls tools to fetch data (price history, indicators, correlation) rather than receiving a pre-built static snapshot. Standard agentic loop: send → if `stop_reason == "tool_use"` execute tools → repeat → return final text.
 
 ---
 
@@ -159,6 +160,15 @@ GET /prices/latest?symbol=AAPL&provider=finnhub
 MA Consumer (separate container, price-events topic):
   └─> MovingAverageService(db).compute_and_store(symbol, provider)
         └─> 5 most recent PricePoints → avg → store MovingAverage (deduped)
+
+GET /portfolios/{id}/analysis:
+  └─> PortfolioIntelligenceService.analyze()
+        ├─> snapshot + risk + indicators + alerts + 7-day price changes
+        └─> Claude → structured JSON (regime, risks, recommendations, narrative)
+
+POST /portfolios/{id}/ask:
+  └─> MarketQAService.ask()
+        └─> Claude tool-use loop → get_price_history / get_technical_indicators / get_correlation
 ```
 
 ---
@@ -171,11 +181,13 @@ MA Consumer (separate container, price-events topic):
 | `raw_market_data` | id (UUID), symbol, provider, raw_json, timestamp | Raw API responses |
 | `price_points` | id (UUID), symbol, price, timestamp, provider, raw_data_id (FK) | Partitioned by month (`RANGE` on timestamp). PK is `(id, timestamp)`. |
 | `moving_average` | symbol, average_price, interval=5, provider, timestamp | 5-pt MA, deduped by timestamp |
+| `alerts` | id, symbol, anomaly_type, severity, price, z_score, fast_ma, slow_ma, resolved | Uses `alertseverity` + `anomalytype` Postgres enums |
+| `portfolios` | id (UUID), name, created_at | |
+| `positions` | id (UUID), portfolio_id (FK), symbol, provider, quantity, avg_cost_basis, opened_at, closed_at, is_active | |
 
-**Phase 2 done:** monthly `RANGE` partitioning on `price_points(timestamp)`. Partitions exist for 2026-03 through 2027-12 plus `price_points_future`.
-**Phase 3 done:** `alerts` table with `alertseverity` and `anomalytype` Postgres enums + `resolved` boolean. Migration uses raw `op.execute()` SQL throughout — `op.create_table()` with `create_type=False` was silently ignored by SQLAlchemy, causing `DuplicateObject` errors.
-**Phase 5 done:** `portfolios` and `positions` tables. Migration `e5f6a7b8c9d0_add_portfolio_tables.py` uses raw `op.execute()` SQL (same pattern as alerts).
-**Phase 7 done:** No new tables. `PositionSnapshot` schema gained `position_id: UUID` field (required for the Close button in the dashboard).
+**Partitioning:** monthly `RANGE` on `price_points(timestamp)`. Partitions exist for 2026-03 through 2027-12 plus `price_points_future`.
+
+**Migration gotcha:** Never use `op.create_table()` with Enum columns — SQLAlchemy ignores `create_type=False` and emits a second `CREATE TYPE`, causing `DuplicateObject` errors. Always use raw `op.execute()` SQL. See `c3f9a12b4e01_add_alerts_table.py`.
 
 ---
 
@@ -193,10 +205,7 @@ REDIS_URL
 POSTGRES_USER
 POSTGRES_PASSWORD
 POSTGRES_DB
-# Phase 3+:
 ANTHROPIC_API_KEY
-# Phase 9+:
-ALERT_WEBHOOK_URLS        # Comma-separated webhook URLs
 ```
 
 ---
@@ -207,35 +216,13 @@ ALERT_WEBHOOK_URLS        # Comma-separated webhook URLs
 |-----------|------|------|
 | `marketdata-api` | 8000 | FastAPI + uvicorn |
 | `ma-consumer` | — | Moving average Kafka consumer |
+| `anomaly-consumer` | — | Anomaly detection Kafka consumer |
 | `kafka` | 9092 | Message broker |
 | `zookeeper` | 2181 | Kafka coordination |
 | `postgres` | 5433 | Database |
 | `redis` | 6379 | Cache |
 | `adminer` | 8080 | DB admin UI |
 | `kafka-init` | — | One-shot topic creation |
-
-**Phase 3 done:** `anomaly_consumer` container added.
-**Phase 7 done:** No new containers — `kafka_broadcaster` runs as an asyncio task inside `marketdata-api`.
-**Phase 9 adds:** `prometheus` (9090) and `grafana` (3000).
-
----
-
-## Dependencies
-
-Current `requirements/requirements.txt`:
-- `fastapi`, `uvicorn`, `uvloop` — web server
-- `sqlalchemy[asyncio]`, `asyncpg`, `alembic`, `psycopg2-binary` — async DB (sync kept for MA consumer)
-- `redis` — includes `redis.asyncio` client
-- `confluent_kafka` — Kafka
-- `httpx` — async HTTP for external APIs
-- `pydantic-settings` — config
-
-**Phase 3 added:** `anthropic`
-**Phase 6 added:** `numpy`, `scipy`
-**Phase 7 added:** `aiokafka`
-
-**To add per phase:**
-- Phase 9: `prometheus-client`
 
 ---
 
@@ -283,12 +270,11 @@ docker compose -f docker/docker-compose.yml down -v
 - **Never add logic to `consumer.py`** — it owns the Kafka loop only. Business logic goes in a service class.
 - **Never import `settings` inside a provider class body** — keys are injected via constructor from `registry.py`.
 - **PriceService is not a singleton** — instantiate it per request/job tick with the correct `db` session.
-- **`include_raw_id` parameter is gone** — it was part of the old duplicate-write bug. `_persist()` always writes both `RawMarketData` and `PricePoint`.
 - **MA consumer uses sync session** — `SessionLocal`, not `AsyncSessionLocal`. confluent_kafka's poll loop is blocking.
 - **price_points PK is `(id, timestamp)`** — Postgres requires the partition key in every unique constraint. Queries filtering only on `id` won't use the PK index efficiently; always include `timestamp`.
 - **`--env-file .env` is required** — the compose file is in `docker/`, so Docker Compose won't find the root `.env` automatically. Always pass `--env-file .env` from the project root.
-- **Never use `op.create_table()` with Enum columns** — SQLAlchemy ignores `create_type=False` inside `op.create_table()` and emits a second `CREATE TYPE`, causing `DuplicateObject` errors. Always use `op.execute()` with raw SQL for the full CREATE TABLE when the table references custom Postgres enum types. See `c3f9a12b4e01_add_alerts_table.py`.
 - **`anomaly_consumer` service key vs container name** — the Docker Compose service key is `anomaly_consumer` (underscore); the container name is `anomaly-consumer` (hyphen). `docker compose logs` takes the service key.
 - **`pnl_pct` is a ratio, not a percentage** — `portfolio_service.get_snapshot()` returns `pnl_pct` as e.g. `0.389`. The dashboard multiplies by 100 for display. Do not add `* 100` back to the service.
 - **`DELETE /prices/poll/{job_id}` hard-deletes the row** — the polling worker picks up jobs by querying the DB; deleting the row stops it from ever running again.
 - **Dashboard portfolio UUID persists in localStorage** — `activatePortfolio(id, name, persist=true)` writes to `localStorage`. Page refresh restores the active portfolio automatically.
+- **Never use `op.create_table()` with Enum columns** — use raw `op.execute()` SQL instead. See migration gotcha in Database Schema section above.
