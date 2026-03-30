@@ -36,8 +36,8 @@ class PortfolioService:
     # Portfolio CRUD
     # ------------------------------------------------------------------
 
-    async def create_portfolio(self, name: str) -> Portfolio:
-        portfolio = Portfolio(name=name)
+    async def create_portfolio(self, name: str, portfolio_type: str = "stock") -> Portfolio:
+        portfolio = Portfolio(name=name, portfolio_type=portfolio_type)
         self.db.add(portfolio)
         await self.db.commit()
         await self.db.refresh(portfolio)

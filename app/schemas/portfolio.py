@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class CreatePortfolioRequest(BaseModel):
     name: str
+    portfolio_type: str = "stock"
 
 
 class PortfolioResponse(BaseModel):
@@ -17,6 +18,7 @@ class PortfolioResponse(BaseModel):
 
     id: UUID
     name: str
+    portfolio_type: str
     created_at: datetime
 
 

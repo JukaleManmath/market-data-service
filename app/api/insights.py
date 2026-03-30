@@ -1,6 +1,7 @@
 import logging
 
-from fastapi import APIRouter, Depends
+from anthropic import APIError as AnthropicAPIError
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +48,9 @@ async def get_symbol_insights(
     ]
 
     service = AIInsightsService(cache=redis_client)
-    summary = await service.get_summary(symbol, provider, alerts_as_dicts)
+    try:
+        summary = await service.get_summary(symbol, provider, alerts_as_dicts)
+    except AnthropicAPIError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Claude API error: {e}")
 
     return {"symbol": symbol, "provider": provider, "summary": summary}

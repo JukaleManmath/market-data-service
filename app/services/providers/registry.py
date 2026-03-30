@@ -4,6 +4,7 @@ from app.core.config import settings
 from app.services.providers.base import BaseProvider
 from app.services.providers.finnhub import FinnhubProvider
 from app.services.providers.alpha_vantage import AlphaVantageProvider
+from app.services.providers.binance import BinanceProvider
 
 # Add a new data source by:
 #   1. Creating a new subclass of BaseProvider
@@ -11,6 +12,7 @@ from app.services.providers.alpha_vantage import AlphaVantageProvider
 _PROVIDERS: dict[str, BaseProvider] = {
     "finnhub": FinnhubProvider(api_key=settings.finnhub_api_key),
     "alpha_vantage": AlphaVantageProvider(api_key=settings.alpha_vantage_api_key),
+    "binance": BinanceProvider(),
 }
 
 

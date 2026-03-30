@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
     netcat-openbsd \
+    curl \
  && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -17,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
 COPY app /app
-COPY scripts/run_ma_consumer.py ./scripts/run_ma_consumer.py
+COPY scripts/ ./scripts/
 
 # Copy alembic config and migration scripts
 COPY alembic.ini ./alembic.ini

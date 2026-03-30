@@ -1,6 +1,7 @@
 import logging
 from uuid import UUID
 
+from anthropic import APIError as AnthropicAPIError
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,7 +35,7 @@ async def create_portfolio(
     body: CreatePortfolioRequest,
     service: PortfolioService = Depends(_service),
 ) -> PortfolioResponse:
-    portfolio = await service.create_portfolio(name=body.name)
+    portfolio = await service.create_portfolio(name=body.name, portfolio_type=body.portfolio_type)
     return portfolio
 
 
@@ -122,6 +123,8 @@ async def get_portfolio_analysis(
         result = await svc.analyze(portfolio_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except AnthropicAPIError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Claude API error: {e}")
     return PortfolioAnalysisResponse(**result)
 
 
@@ -144,4 +147,6 @@ async def ask_portfolio_question(
         result = await svc.ask(portfolio_id, body.question)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except AnthropicAPIError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Claude API error: {e}")
     return AskQuestionResponse(**result)

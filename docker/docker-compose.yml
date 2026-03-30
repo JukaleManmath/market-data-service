@@ -84,6 +84,12 @@ services:
         condition: service_healthy
     env_file:
       - ../.env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   ma_consumer:
     build:
@@ -116,6 +122,34 @@ services:
         condition: service_healthy
     env_file:
       - ../.env
+
+  seed:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: marketdata-seed
+    command: python3 scripts/seed_demo_data.py
+    environment:
+      API_BASE_URL: "http://marketdata-api:8000"
+    volumes:
+      - ../scripts:/app/scripts
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    restart: "no"
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: marketdata-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
 
   adminer:
     image: adminer
