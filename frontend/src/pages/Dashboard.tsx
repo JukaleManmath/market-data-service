@@ -4,16 +4,21 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import {
-  Activity, DollarSign, AlertTriangle, TrendingUp, RefreshCw,
+  Activity, DollarSign, AlertTriangle, TrendingUp, RefreshCw, Briefcase,
 } from 'lucide-react'
 import StatCard from '../components/ui/StatCard'
 import {
   fetchHealth, fetchLatestPrice, fetchAlerts, fetchSnapshot, fetchPriceHistory,
 } from '../api/client'
-import type { AlertResponse, HealthResponse, PriceResponse, PortfolioSnapshot } from '../types'
+import type { AlertResponse, HealthResponse, PortfolioSnapshot } from '../types'
 
-const SYMBOLS = ['AAPL', 'NVDA', 'TSLA', 'MSFT', 'GOOGL']
+const PORTFOLIO_KEY = 'mip_portfolio_id'
+const PORTFOLIO_NAME_KEY = 'mip_portfolio_name'
+const PORTFOLIO_TYPE_KEY = 'mip_portfolio_type'
 const PORTFOLIOS_LIST_KEY = 'mip_portfolios'
+
+const DEFAULT_STOCK_SYMBOLS = ['AAPL', 'NVDA', 'TSLA', 'MSFT', 'GOOGL']
+const DEFAULT_CRYPTO_SYMBOLS = ['BTC', 'ETH', 'SOL', 'BNB', 'ADA']
 
 interface PortfolioEntry { id: string; name: string; type: string }
 
@@ -29,12 +34,28 @@ const fmtUsd = (n: number) =>
 const fmtTime = (ts: string) =>
   new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
 
+function readPortfoliosList(): PortfolioEntry[] {
+  try {
+    const stored: PortfolioEntry[] = JSON.parse(localStorage.getItem(PORTFOLIOS_LIST_KEY) ?? '[]')
+    if (stored.length > 0) return stored
+    // Bootstrap from legacy single-portfolio keys
+    const id = localStorage.getItem(PORTFOLIO_KEY)
+    const name = localStorage.getItem(PORTFOLIO_NAME_KEY)
+    const type = localStorage.getItem(PORTFOLIO_TYPE_KEY) ?? 'stock'
+    if (id && name) return [{ id, name, type }]
+    return []
+  } catch { return [] }
+}
+
 export default function Dashboard() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [prices, setPrices] = useState<PriceCard[]>([])
   const [alerts, setAlerts] = useState<AlertResponse[]>([])
-  const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
-  const [chartData, setChartData] = useState<{ time: string; value: number }[]>([])
+  const [totalValue, setTotalValue] = useState(0)
+  const [totalPnl, setTotalPnl] = useState(0)
+  const [portfolioCount, setPortfolioCount] = useState(0)
+  const [chartLabel, setChartLabel] = useState<string | null>(null)
+  const [chartData, setChartData] = useState<{ time: string; index: number; value: number }[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
 
@@ -43,24 +64,63 @@ export default function Dashboard() {
     else setLoading(true)
 
     try {
-      const [h, al] = await Promise.all([
+      const [h, allAlerts] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchAlerts().catch(() => [] as AlertResponse[]),
       ])
       setHealth(h)
-      setAlerts(al)
 
-      // Fetch prices + history for real % change
+      // Read all portfolios from localStorage
+      const portfoliosList = readPortfoliosList()
+
+      // Fetch all snapshots in parallel
+      const snapResults = await Promise.allSettled(
+        portfoliosList.map(p => fetchSnapshot(p.id).catch(() => null))
+      )
+      const snapshots: PortfolioSnapshot[] = snapResults
+        .filter(r => r.status === 'fulfilled')
+        .map(r => (r as PromiseFulfilledResult<PortfolioSnapshot | null>).value)
+        .filter((s): s is PortfolioSnapshot => s !== null)
+
+      const aggValue = snapshots.reduce((sum, s) => sum + s.total_value, 0)
+      const aggPnl = snapshots.reduce((sum, s) => sum + s.total_pnl, 0)
+      setTotalValue(aggValue)
+      setTotalPnl(aggPnl)
+      setPortfolioCount(snapshots.length)
+
+      // Union of all position symbols across all portfolios, deduped by symbol:provider
+      const seenSymbols = new Map<string, { symbol: string; provider: string }>()
+      for (const snap of snapshots) {
+        for (const pos of snap.positions) {
+          const key = `${pos.symbol}:${pos.provider}`
+          if (!seenSymbols.has(key)) seenSymbols.set(key, { symbol: pos.symbol, provider: pos.provider })
+        }
+      }
+      let priceTargets = Array.from(seenSymbols.values())
+
+      if (priceTargets.length === 0) {
+        const hasCrypto = portfoliosList.some(p => p.type === 'crypto')
+        const hasStock = portfoliosList.some(p => p.type === 'stock') || portfoliosList.length === 0
+        if (hasStock) priceTargets.push(...DEFAULT_STOCK_SYMBOLS.map(s => ({ symbol: s, provider: 'finnhub' })))
+        if (hasCrypto) priceTargets.push(...DEFAULT_CRYPTO_SYMBOLS.map(s => ({ symbol: s, provider: 'binance' })))
+      }
+
+      // Filter alerts to any symbol tracked across all portfolios
+      const trackedSymbols = new Set(priceTargets.map(t => t.symbol))
+      const filteredAlerts = allAlerts.filter(a => trackedSymbols.has(a.symbol))
+      setAlerts(filteredAlerts.length > 0 ? filteredAlerts : allAlerts)
+
+      // Fetch live prices for all tracked symbols (cap at 8 to keep the panel readable)
       const priceResults = await Promise.allSettled(
-        SYMBOLS.map(async s => {
+        priceTargets.slice(0, 8).map(async ({ symbol, provider }) => {
           const [p, hist] = await Promise.all([
-            fetchLatestPrice(s),
-            fetchPriceHistory(s, 'finnhub', 2).catch(() => []),
+            fetchLatestPrice(symbol, provider),
+            fetchPriceHistory(symbol, provider, 2).catch(() => []),
           ])
           const change = hist.length >= 2
             ? ((p.price - hist[0].price) / hist[0].price) * 100
             : 0
-          return { symbol: s, price: p.price, change }
+          return { symbol, price: p.price, change }
         })
       )
       const live: PriceCard[] = priceResults
@@ -68,26 +128,25 @@ export default function Dashboard() {
         .map(r => (r as PromiseFulfilledResult<PriceCard>).value)
       setPrices(live)
 
-      // Fetch all portfolio snapshots and aggregate
-      let portfolios: PortfolioEntry[] = []
-      try { portfolios = JSON.parse(localStorage.getItem(PORTFOLIOS_LIST_KEY) ?? '[]') } catch { /* */ }
+      // Build chart: use the portfolio with the highest total_value, pick its largest position
+      const largestSnap = snapshots.length > 0
+        ? snapshots.reduce((best, s) => s.total_value > best.total_value ? s : best, snapshots[0])
+        : null
 
-      if (portfolios.length > 0) {
-        const snaps = (await Promise.allSettled(portfolios.map(p => fetchSnapshot(p.id))))
-          .filter(r => r.status === 'fulfilled')
-          .map(r => (r as PromiseFulfilledResult<PortfolioSnapshot>).value)
-        setSnapshots(snaps)
+      if (largestSnap && largestSnap.positions.length > 0) {
+        const label = snapshots.length > 1 ? `${snapshots.length} Portfolios` : (portfoliosList[0]?.name ?? null)
+        setChartLabel(label)
 
-        // Build chart from highest-value position across all portfolios
-        const allPositions = snaps.flatMap(s => s.positions).sort((a, b) => b.market_value - a.market_value)
+        const positions = [...largestSnap.positions].sort((a, b) => b.market_value - a.market_value)
         let chartBuilt = false
-        for (const pos of allPositions) {
+        for (const pos of positions) {
           const hist = await fetchPriceHistory(pos.symbol, pos.provider, 60).catch(() => [])
           if (hist.length >= 2) {
             const latestHistPrice = hist[hist.length - 1].price
             const scale = pos.market_value / latestHistPrice
-            setChartData(hist.map(h => ({
+            setChartData(hist.map((h, i) => ({
               time: new Date(h.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+              index: i,
               value: h.price * scale,
             })))
             chartBuilt = true
@@ -95,21 +154,26 @@ export default function Dashboard() {
           }
         }
         if (!chartBuilt) {
-          const hist = await fetchPriceHistory('AAPL', 'finnhub', 60).catch(() => [])
+          const hasCrypto = portfoliosList.some(p => p.type === 'crypto')
+          const fallback = hasCrypto ? { symbol: 'BTC', provider: 'binance' } : { symbol: 'AAPL', provider: 'finnhub' }
+          const hist = await fetchPriceHistory(fallback.symbol, fallback.provider, 60).catch(() => [])
           if (hist.length >= 2) {
-            setChartData(hist.map(h => ({
+            setChartData(hist.map((h, i) => ({
               time: new Date(h.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+              index: i,
               value: h.price,
             })))
           }
         }
       } else {
-        setSnapshots([])
-        // No portfolios — show AAPL price history as a market reference
-        const hist = await fetchPriceHistory('AAPL', 'finnhub', 60).catch(() => [])
+        setChartLabel(null)
+        const hasCrypto = portfoliosList.some(p => p.type === 'crypto')
+        const fallback = hasCrypto ? { symbol: 'BTC', provider: 'binance' } : { symbol: 'AAPL', provider: 'finnhub' }
+        const hist = await fetchPriceHistory(fallback.symbol, fallback.provider, 60).catch(() => [])
         if (hist.length >= 2) {
-          setChartData(hist.map(h => ({
+          setChartData(hist.map((h, i) => ({
             time: new Date(h.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+            index: i,
             value: h.price,
           })))
         }
@@ -124,9 +188,8 @@ export default function Dashboard() {
 
   const totalAlerts = alerts.length
   const criticalAlerts = alerts.filter(a => a.severity === 'critical').length
-  const totalValue = snapshots.reduce((s, p) => s + p.total_value, 0)
-  const totalPnl = snapshots.reduce((s, p) => s + p.total_pnl, 0)
-  const hasPortfolio = snapshots.length > 0
+  const hasPortfolios = portfolioCount > 0
+  const costBasis = totalValue - totalPnl
 
   return (
     <motion.div
@@ -175,9 +238,10 @@ export default function Dashboard() {
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <StatCard
-          title={snapshots.length > 1 ? `Total Value (${snapshots.length} portfolios)` : 'Portfolio Value'}
-          value={hasPortfolio ? fmtUsd(totalValue) : '—'}
-          trend={hasPortfolio && (totalValue - totalPnl) > 0 ? (totalPnl / (totalValue - totalPnl)) * 100 : undefined}
+          title="Total Portfolio Value"
+          value={hasPortfolios ? fmtUsd(totalValue) : '—'}
+          subtitle={hasPortfolios ? `${portfolioCount} portfolio${portfolioCount > 1 ? 's' : ''}` : undefined}
+          trend={hasPortfolios && costBasis > 0 ? (totalPnl / costBasis) * 100 : undefined}
           icon={<DollarSign size={14} />}
           accentColor="blue"
           loading={loading}
@@ -185,10 +249,10 @@ export default function Dashboard() {
         />
         <StatCard
           title="Unrealized P&L"
-          value={hasPortfolio ? fmtUsd(totalPnl) : '—'}
-          subtitle={snapshots.length > 1 ? 'Across all portfolios' : 'All positions'}
+          value={hasPortfolios ? fmtUsd(totalPnl) : '—'}
+          subtitle="All positions"
           icon={<TrendingUp size={14} />}
-          accentColor={hasPortfolio && totalPnl >= 0 ? 'green' : 'red'}
+          accentColor={hasPortfolios && totalPnl >= 0 ? 'green' : 'red'}
           loading={loading}
           delay={0.05}
         />
@@ -202,10 +266,10 @@ export default function Dashboard() {
           delay={0.1}
         />
         <StatCard
-          title="Tracked Symbols"
-          value={prices.length}
-          subtitle="Live market data"
-          icon={<Activity size={14} />}
+          title="Portfolios"
+          value={hasPortfolios ? portfolioCount : '—'}
+          subtitle={hasPortfolios ? `${prices.length} symbols tracked` : 'No portfolios yet'}
+          icon={<Briefcase size={14} />}
           accentColor="cyan"
           loading={loading}
           delay={0.15}
@@ -228,11 +292,11 @@ export default function Dashboard() {
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-sm font-semibold text-white">
-                {hasPortfolio ? 'Portfolio Performance' : 'Market Reference — AAPL'}
+                {chartLabel ? `Combined Performance — ${chartLabel}` : 'Market Reference — AAPL'}
               </h3>
-              <p className="text-xs text-slate-500">Price history · last data points</p>
+              <p className="text-xs text-slate-500">Price history · last 60 data points</p>
             </div>
-            {hasPortfolio && (
+            {hasPortfolios && (
               <span
                 className="text-xs font-medium px-2 py-1 rounded-md"
                 style={{
@@ -257,7 +321,20 @@ export default function Dashboard() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-                <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
+                <XAxis
+                  dataKey="index"
+                  tick={{ fill: '#64748b', fontSize: 11 }}
+                  tickLine={false}
+                  axisLine={false}
+                  ticks={chartData.length > 1 ? [
+                    0,
+                    Math.floor(chartData.length * 0.25),
+                    Math.floor(chartData.length * 0.5),
+                    Math.floor(chartData.length * 0.75),
+                    chartData.length - 1,
+                  ] : [0]}
+                  tickFormatter={(idx: number) => chartData[idx]?.time ?? ''}
+                />
                 <YAxis
                   tick={{ fill: '#64748b', fontSize: 11 }}
                   tickLine={false}
@@ -274,6 +351,7 @@ export default function Dashboard() {
                     fontSize: '12px',
                   }}
                   formatter={(v: number) => [fmtUsd(v), 'Value']}
+                  labelFormatter={(idx: number) => chartData[idx]?.time ?? ''}
                 />
                 <Area
                   type="monotone"

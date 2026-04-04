@@ -1,7 +1,8 @@
 import logging
 
+import httpx
 from anthropic import APIError as AnthropicAPIError
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,11 +20,14 @@ router = APIRouter(prefix="/insights", tags=["AI Insights"])
 async def get_symbol_insights(
     symbol: str,
     provider: str = "finnhub",
+    llm_provider: str | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
     """
-    Return a Claude-generated plain-English summary of recent anomaly alerts
-    for the given symbol. Results are cached in Redis for 5 minutes.
+    Return a plain-English summary of recent anomaly alerts for the given symbol.
+    Results are cached in Redis for 5 minutes.
+
+    Pass llm_provider=ollama to use a local Ollama model instead of Claude.
     """
     result = await db.execute(
         select(Alert)
@@ -47,10 +51,12 @@ async def get_symbol_insights(
         for a in alerts
     ]
 
-    service = AIInsightsService(cache=redis_client)
+    service = AIInsightsService(cache=redis_client, llm_provider=llm_provider)
     try:
         summary = await service.get_summary(symbol, provider, alerts_as_dicts)
     except AnthropicAPIError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Claude API error: {e}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Ollama error: {e}")
 
     return {"symbol": symbol, "provider": provider, "summary": summary}

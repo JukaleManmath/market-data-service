@@ -1,8 +1,9 @@
 import logging
 from uuid import UUID
 
+import httpx
 from anthropic import APIError as AnthropicAPIError
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis import redis_client
@@ -107,24 +108,28 @@ async def get_snapshot(
 @router.get("/{portfolio_id}/analysis", response_model=PortfolioAnalysisResponse)
 async def get_portfolio_analysis(
     portfolio_id: UUID,
+    llm_provider: str | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> PortfolioAnalysisResponse:
     """
-    Claude full portfolio analysis.
+    Full portfolio analysis via the configured LLM.
 
     Gathers snapshot, risk metrics, technical indicators, active alerts, and
-    7-day price changes, then returns a structured Claude analyst report:
+    7-day price changes, then returns a structured analyst report:
     market regime, top risks, rebalancing recommendations, alert explanations.
 
+    Pass llm_provider=ollama to use a local Ollama model instead of Claude.
     Cached in Redis for 5 minutes.
     """
     try:
-        svc = PortfolioIntelligenceService(db=db, cache=redis_client)
+        svc = PortfolioIntelligenceService(db=db, cache=redis_client, llm_provider=llm_provider)
         result = await svc.analyze(portfolio_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except AnthropicAPIError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Claude API error: {e}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Ollama error: {e}")
     return PortfolioAnalysisResponse(**result)
 
 
@@ -132,21 +137,25 @@ async def get_portfolio_analysis(
 async def ask_portfolio_question(
     portfolio_id: UUID,
     body: AskQuestionRequest,
+    llm_provider: str | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AskQuestionResponse:
     """
     Natural language Q&A about the portfolio.
 
-    Claude uses tool use to actively fetch price history, technical indicators,
+    The LLM uses tool use to actively fetch price history, technical indicators,
     and correlations from the database to answer the question.
 
+    Pass llm_provider=ollama to use a local Ollama model instead of Claude.
     Cached per (portfolio_id, question) for 2 minutes.
     """
     try:
-        svc = MarketQAService(db=db, cache=redis_client)
+        svc = MarketQAService(db=db, cache=redis_client, llm_provider=llm_provider)
         result = await svc.ask(portfolio_id, body.question)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except AnthropicAPIError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Claude API error: {e}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Ollama error: {e}")
     return AskQuestionResponse(**result)

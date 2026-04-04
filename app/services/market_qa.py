@@ -13,13 +13,11 @@ import logging
 from uuid import UUID
 
 import numpy as np
-from anthropic import AsyncAnthropic
-from anthropic.types import ToolUseBlock
 from redis.asyncio import Redis
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.llm_client import get_llm_client
 from app.models.price_points import PricePoint
 from app.prompts.portfolio_analysis import build_qa_system_prompt, build_qa_user_prompt
 from app.services.signal_generator import SignalGenerator
@@ -93,10 +91,10 @@ class MarketQAService:
     synthesises a plain-English answer.
     """
 
-    def __init__(self, db: AsyncSession, cache: Redis) -> None:
+    def __init__(self, db: AsyncSession, cache: Redis, llm_provider: str | None = None) -> None:
         self._db = db
         self._cache = cache
-        self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._client = get_llm_client(provider=llm_provider)
 
     # ------------------------------------------------------------------
     # Public API
@@ -135,11 +133,11 @@ class MarketQAService:
 
     async def _run_tool_loop(self, question: str, portfolio_context: dict) -> str:
         """
-        Standard Claude tool-use loop:
-          1. Send question + tools to Claude
-          2. If Claude returns tool_use blocks, execute them
-          3. Append tool_result and call Claude again
-          4. Repeat until Claude returns a text response with no tool calls
+        Provider-agnostic tool-use loop:
+          1. Send question + tools to the LLM client
+          2. If the response contains tool calls, execute them
+          3. Append tool results in the provider's expected format and repeat
+          4. Stop when the client signals done (no more tool calls)
         """
         messages = [
             {
@@ -150,51 +148,29 @@ class MarketQAService:
         system = build_qa_system_prompt()
 
         while True:
-            response = await self._client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1024,
-                system=system,
-                tools=TOOLS,
+            result = await self._client.complete(
                 messages=messages,
+                system=system,
+                max_tokens=1024,
+                tools=TOOLS,
             )
 
-            # Append assistant response to the conversation
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append(result.assistant_message)
 
-            # No tool calls → we have the final answer
-            if response.stop_reason == "end_turn":
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        return block.text
-                return ""
+            if result.done:
+                return result.text or ""
 
-            # Process tool calls
-            tool_results = []
-            for block in response.content:
-                if not isinstance(block, ToolUseBlock):
-                    continue
-
-                tool_output = await self._dispatch_tool(block.name, block.input)
-                logger.info(f"[QA] Tool called: {block.name}({block.input})")
-
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(tool_output, default=str),
-                    }
-                )
-
-            if not tool_results:
-                # stop_reason was tool_use but no ToolUseBlocks found — shouldn't happen
+            if not result.tool_calls:
                 break
 
-            messages.append({"role": "user", "content": tool_results})
+            tool_results: list[tuple[str, object]] = []
+            for tc in result.tool_calls:
+                output = await self._dispatch_tool(tc.name, tc.input)
+                logger.info(f"[QA] Tool called: {tc.name}({tc.input})")
+                tool_results.append((tc.id, output))
 
-        # Fallback: extract any text from last response
-        for block in response.content:
-            if hasattr(block, "text"):
-                return block.text
+            messages.extend(self._client.make_tool_result_messages(tool_results))
+
         return "Unable to generate an answer."
 
     # ------------------------------------------------------------------

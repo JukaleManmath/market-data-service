@@ -12,6 +12,7 @@ import type { PortfolioAnalysisResponse } from '../types'
 
 const PORTFOLIO_KEY = 'mip_portfolio_id'
 const PORTFOLIO_NAME_KEY = 'mip_portfolio_name'
+const LLM_PROVIDER_KEY = 'mip_llm_provider'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -29,6 +30,9 @@ const SUGGESTED = [
 export default function AIInsights() {
   const [portfolioId] = useState<string | null>(() => localStorage.getItem(PORTFOLIO_KEY))
   const [portfolioName] = useState(() => localStorage.getItem(PORTFOLIO_NAME_KEY) ?? 'Portfolio')
+  const [llmProvider, setLlmProvider] = useState<'claude' | 'ollama'>(
+    () => (localStorage.getItem(LLM_PROVIDER_KEY) as 'claude' | 'ollama') ?? 'claude'
+  )
 
   // Symbol insights
   const [insightSymbol, setInsightSymbol] = useState('')
@@ -50,16 +54,29 @@ export default function AIInsights() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const switchProvider = (p: 'claude' | 'ollama') => {
+    setLlmProvider(p)
+    localStorage.setItem(LLM_PROVIDER_KEY, p)
+    setAnalysis(null)
+    setInsight(null)
+    setMessages([])
+  }
+
   const loadAnalysis = async () => {
     if (!portfolioId) return
     setAnalysisLoading(true)
     setAnalysisError(null)
     try {
-      const data = await fetchPortfolioAnalysis(portfolioId)
+      const data = await fetchPortfolioAnalysis(portfolioId, llmProvider)
       setAnalysis(data)
     } catch (e: unknown) {
       if (axios.isAxiosError(e) && e.response?.data?.detail) {
-        setAnalysisError(e.response.data.detail)
+        const detail: string = e.response.data.detail
+        if (llmProvider === 'ollama' && detail.toLowerCase().includes('ollama')) {
+          setAnalysisError('Cannot reach Ollama. Make sure Ollama is running locally and OLLAMA_BASE_URL is set to http://host.docker.internal:11434 in your .env, then rebuild the API container.')
+        } else {
+          setAnalysisError(detail)
+        }
       } else {
         setAnalysisError('Failed to load analysis. Ensure the portfolio has positions with price data.')
       }
@@ -72,11 +89,16 @@ export default function AIInsights() {
     if (!sym.trim()) return
     setInsightLoading(true)
     try {
-      const data = await fetchInsights(sym.trim().toUpperCase())
+      const data = await fetchInsights(sym.trim().toUpperCase(), llmProvider)
       setInsight(data.summary)
     } catch (e: unknown) {
       if (axios.isAxiosError(e) && e.response?.data?.detail) {
-        setInsight(`Error: ${e.response.data.detail}`)
+        const detail: string = e.response.data.detail
+        if (llmProvider === 'ollama' && detail.toLowerCase().includes('ollama')) {
+          setInsight('Cannot reach Ollama. Make sure Ollama is running locally and OLLAMA_BASE_URL=http://host.docker.internal:11434 is set in your .env.')
+        } else {
+          setInsight(`Error: ${detail}`)
+        }
       } else {
         setInsight(`Could not fetch insights for ${sym.toUpperCase()}. Ensure price data exists.`)
       }
@@ -93,12 +115,18 @@ export default function AIInsights() {
     setQuestion('')
     setQaLoading(true)
     try {
-      const res = await askQuestion(portfolioId, text)
+      const res = await askQuestion(portfolioId, text, llmProvider)
       setMessages(prev => [...prev, { role: 'assistant', content: res.answer, cached: res.cached }])
     } catch (e: unknown) {
-      const detail = axios.isAxiosError(e) && e.response?.data?.detail
-        ? e.response.data.detail
-        : 'I encountered an error processing your question. Please try again.'
+      let detail = 'I encountered an error processing your question. Please try again.'
+      if (axios.isAxiosError(e) && e.response?.data?.detail) {
+        const raw: string = e.response.data.detail
+        if (llmProvider === 'ollama' && raw.toLowerCase().includes('ollama')) {
+          detail = 'Cannot reach Ollama. Make sure Ollama is running locally and OLLAMA_BASE_URL=http://host.docker.internal:11434 is set in your .env.'
+        } else {
+          detail = raw
+        }
+      }
       setMessages(prev => [...prev, { role: 'assistant', content: detail }])
     } finally {
       setQaLoading(false)
@@ -121,16 +149,47 @@ export default function AIInsights() {
       transition={{ duration: 0.3 }}
       className="space-y-6"
     >
-      <div className="flex items-center gap-3">
-        <div
-          className="w-10 h-10 rounded-xl flex items-center justify-center"
-          style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.3), rgba(6,182,212,0.2))' }}
-        >
-          <Sparkles size={18} className="text-violet-400" />
+      <div className="flex items-center justify-between w-full">
+        <div className="flex items-center gap-3">
+          <div
+            className="w-10 h-10 rounded-xl flex items-center justify-center"
+            style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.3), rgba(6,182,212,0.2))' }}
+          >
+            <Sparkles size={18} className="text-violet-400" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-white">AI Insights</h1>
+            <p className="text-sm text-slate-400">
+              {llmProvider === 'ollama'
+                ? 'Powered by Ollama (local) — portfolio intelligence & natural language Q&A'
+                : 'Powered by Claude — portfolio intelligence & natural language Q&A'}
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-2xl font-bold text-white">AI Insights</h1>
-          <p className="text-sm text-slate-400">Powered by Claude — portfolio intelligence & natural language Q&A</p>
+
+        {/* Provider toggle */}
+        <div
+          className="flex items-center rounded-xl p-1 gap-1"
+          style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)' }}
+        >
+          {(['claude', 'ollama'] as const).map(p => (
+            <button
+              key={p}
+              onClick={() => switchProvider(p)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={
+                llmProvider === p
+                  ? {
+                      background: p === 'ollama' ? 'rgba(16,185,129,0.2)' : 'rgba(139,92,246,0.25)',
+                      color: p === 'ollama' ? '#34d399' : '#a78bfa',
+                      border: `1px solid ${p === 'ollama' ? 'rgba(16,185,129,0.3)' : 'rgba(139,92,246,0.3)'}`,
+                    }
+                  : { color: '#64748b', border: '1px solid transparent' }
+              }
+            >
+              {p === 'claude' ? 'Claude' : 'Ollama (local)'}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -178,7 +237,9 @@ export default function AIInsights() {
                   <Loader2 size={10} className="animate-spin text-white" />
                 </div>
               </div>
-              <p className="text-sm text-slate-300">Claude is analysing your portfolio…</p>
+              <p className="text-sm text-slate-300">
+                {llmProvider === 'ollama' ? 'Ollama is analysing your portfolio…' : 'Claude is analysing your portfolio…'}
+              </p>
               <p className="text-xs text-slate-500">Gathering risk metrics, price data & alerts</p>
             </div>
           ) : analysisError ? (
@@ -282,7 +343,9 @@ export default function AIInsights() {
               onClick={loadAnalysis}
             >
               <Bot size={28} className="text-violet-400 opacity-50" />
-              <p className="text-sm text-slate-400">Click "Run Analysis" to get Claude's assessment of your portfolio</p>
+              <p className="text-sm text-slate-400">
+                Click "Run Analysis" to get {llmProvider === 'ollama' ? 'Ollama\'s' : 'Claude\'s'} assessment of your portfolio
+              </p>
             </div>
           )}
         </div>
@@ -341,7 +404,9 @@ export default function AIInsights() {
           >
             <div className="flex items-center gap-2 px-5 py-3 border-b border-white/[0.05]">
               <Bot size={16} className="text-violet-400" />
-              <h3 className="text-sm font-semibold text-white">Ask Claude</h3>
+              <h3 className="text-sm font-semibold text-white">
+                {llmProvider === 'ollama' ? 'Ask Ollama' : 'Ask Claude'}
+              </h3>
               {!portfolioId && <span className="text-xs text-amber-400 ml-auto">Requires portfolio</span>}
             </div>
 

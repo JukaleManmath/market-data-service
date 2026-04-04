@@ -11,12 +11,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from anthropic import AsyncAnthropic
 from redis.asyncio import Redis
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.llm_client import get_llm_client
 from app.models.alerts import Alert
 from app.models.price_points import PricePoint
 from app.models.position import Position
@@ -39,10 +38,10 @@ class PortfolioIntelligenceService:
       - cache: Redis        — for snapshot prices + result caching
     """
 
-    def __init__(self, db: AsyncSession, cache: Redis) -> None:
+    def __init__(self, db: AsyncSession, cache: Redis, llm_provider: str | None = None) -> None:
         self._db = db
         self._cache = cache
-        self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._client = get_llm_client(provider=llm_provider)
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,12 +236,11 @@ class PortfolioIntelligenceService:
     # ------------------------------------------------------------------
 
     async def _call_claude(self, prompt: str) -> str:
-        response = await self._client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
+        result = await self._client.complete(
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=1024,
         )
-        return response.content[0].text
+        return result.text or ""
 
     def _parse_response(self, raw: str, portfolio_id: UUID) -> dict:
         """

@@ -53,11 +53,17 @@ export const closePosition = (portfolioId: string, positionId: string) =>
 export const fetchSnapshot = (portfolioId: string) =>
   http.get<PortfolioSnapshot>(`/portfolios/${portfolioId}/snapshot`).then(r => r.data)
 
-export const fetchPortfolioAnalysis = (portfolioId: string) =>
-  http.get<PortfolioAnalysisResponse>(`/portfolios/${portfolioId}/analysis`).then(r => r.data)
+export const fetchPortfolioAnalysis = (portfolioId: string, llmProvider?: string) =>
+  http.get<PortfolioAnalysisResponse>(`/portfolios/${portfolioId}/analysis`, {
+    params: llmProvider ? { llm_provider: llmProvider } : undefined,
+  }).then(r => r.data)
 
-export const askQuestion = (portfolioId: string, question: string) =>
-  http.post<AskQuestionResponse>(`/portfolios/${portfolioId}/ask`, { question }).then(r => r.data)
+export const askQuestion = (portfolioId: string, question: string, llmProvider?: string) =>
+  http.post<AskQuestionResponse>(
+    `/portfolios/${portfolioId}/ask`,
+    { question },
+    { params: llmProvider ? { llm_provider: llmProvider } : undefined },
+  ).then(r => r.data)
 
 // ── Analytics ────────────────────────────────────────────────────────────────
 
@@ -77,8 +83,10 @@ export const resolveAlert = (alertId: string) =>
 
 // ── Insights ──────────────────────────────────────────────────────────────────
 
-export const fetchInsights = (symbol: string) =>
-  http.get<{ symbol: string; summary: string; cached: boolean }>(`/insights/${symbol}`).then(r => r.data)
+export const fetchInsights = (symbol: string, llmProvider?: string) =>
+  http.get<{ symbol: string; summary: string; cached: boolean }>(`/insights/${symbol}`, {
+    params: llmProvider ? { llm_provider: llmProvider } : undefined,
+  }).then(r => r.data)
 
 // ── Health ───────────────────────────────────────────────────────────────────
 
